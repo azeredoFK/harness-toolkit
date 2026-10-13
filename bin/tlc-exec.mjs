@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync, writeSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -235,8 +235,10 @@ export function decideRuntime({ harnessHome, entry, bunPath, nodeMajor, distExis
 }
 
 function run(harnessHome, command, commandArgs, origin = harnessHome, entry = "") {
+  const isHook = HOOK_ENTRIES.has(entry);
   const result = spawnSync(command, commandArgs, {
-    stdio: "inherit",
+    stdio: isHook ? ["inherit", "pipe", "inherit"] : "inherit",
+    maxBuffer: 64 * 1024 * 1024,
     // why: `TLC_ORIGIN` is where this copy physically lives, which is not `TLC_HOME` once an npm-installed shim
     // is driving the runtime installed under the conventional path. `tlc harness install` needs the former as
     // its source and the latter as its destination, and nothing else in the runtime reads it.
@@ -258,6 +260,16 @@ function run(harnessHome, command, commandArgs, origin = harnessHome, entry = ""
       carryOn();
     }
     process.exit(127);
+  }
+  if (isHook) {
+    const stdout = result.stdout ?? Buffer.alloc(0);
+    if (stdout.toString("utf8").trim() === "") {
+      console.error(
+        `tlc: ${entry} produced no verdict (exit ${result.status ?? result.signal}); carrying on without one.`,
+      );
+      carryOn();
+    }
+    writeSync(1, stdout);
   }
   process.exit(result.status ?? 1);
 }

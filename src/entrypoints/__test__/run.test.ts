@@ -70,13 +70,27 @@ function cursorShellPayload(root: string, overrides: Record<string, unknown> = {
   };
 }
 
-test("empty stdin yields abstain with no stdout and exit 0", async () => {
+test("empty stdin yields abstain rendered as {} and exit 0", async () => {
   const root = tempRoot();
   try {
     const outcome = await withCwd(root, () => runHandler(() => ({ kind: "allow" }), stdinOf("")));
     assert.equal(outcome.decision.kind, "abstain");
-    assert.equal(outcome.rendered.stdout, null);
+    assert.equal(outcome.rendered.stdout, "{}");
     assert.equal(outcome.rendered.exitCode, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a Cursor payload without workspace_roots is still answered, never with empty stdout", async () => {
+  const root = tempRoot();
+  try {
+    const payload = cursorShellPayload(root, { workspace_roots: undefined });
+    const outcome = await withCwd(root, () =>
+      runHandler(() => ({ kind: "allow" }), stdinOf(JSON.stringify(payload))),
+    );
+    assert.equal(outcome.event?.provider, "cursor");
+    assert.equal(outcome.rendered.stdout, '{"permission":"allow"}');
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -99,6 +113,7 @@ test("non-JSON stdin yields abstain and exit 0", async () => {
   try {
     const outcome = await withCwd(root, () => runHandler(() => ({ kind: "allow" }), stdinOf("{ not json")));
     assert.equal(outcome.decision.kind, "abstain");
+    assert.equal(outcome.rendered.stdout, "{}");
     assert.equal(outcome.rendered.exitCode, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -124,6 +139,7 @@ test("a payload matching no provider yields abstain", async () => {
       runHandler(() => ({ kind: "allow" }), stdinOf(JSON.stringify({ foo: "bar" }))),
     );
     assert.equal(outcome.decision.kind, "abstain");
+    assert.equal(outcome.rendered.stdout, "{}");
     assert.equal(outcome.rendered.exitCode, 0);
   } finally {
     rmSync(root, { recursive: true, force: true });

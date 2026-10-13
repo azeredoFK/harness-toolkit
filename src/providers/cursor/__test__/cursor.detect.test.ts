@@ -42,6 +42,13 @@ test("detects a subagentStart payload", () => {
   );
 });
 
+test("accepts a camelCase event that omits workspace_roots", () => {
+  assert.equal(
+    detectCursor({ hook_event_name: "preToolUse", tool_name: "Shell", conversation_id: "c" }),
+    true,
+  );
+});
+
 test("rejects a Claude payload (PascalCase event, no workspace_roots)", () => {
   assert.equal(
     detectCursor({ hook_event_name: "SessionStart", cwd: "/repo", transcript_path: "/tmp/t.jsonl" }),

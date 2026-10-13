@@ -7,8 +7,5 @@ export function detectCursor(raw: unknown): boolean {
   }
   const value = raw as Record<string, unknown>;
   const eventName = value.hook_event_name;
-  if (typeof eventName !== "string" || !CAMEL_CASE_EVENT_NAME.test(eventName)) {
-    return false;
-  }
-  return Array.isArray(value.workspace_roots);
+  return typeof eventName === "string" && CAMEL_CASE_EVENT_NAME.test(eventName);
 }

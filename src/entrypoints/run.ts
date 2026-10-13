@@ -154,7 +154,7 @@ function asRecord(value: unknown): Record<string, unknown> {
 export async function runHandler(handler: Handler, io: RunIo = {}): Promise<RunOutcome> {
   const readStdin = io.readStdin ?? readStdinText;
   const now = io.now ? io.now() : new Date();
-  const abstainRendered: Rendered = { stdout: null, exitCode: 0 };
+  const abstainRendered: Rendered = { stdout: "{}", exitCode: 0 };
 
   const text = await readStdin();
   const trimmed = text.trim();

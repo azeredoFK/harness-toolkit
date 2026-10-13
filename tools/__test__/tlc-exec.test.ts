@@ -484,3 +484,44 @@ describe("a runtime that cannot run", () => {
     assert.deepEqual([...HOOK_ENTRIES].sort(), programs);
   });
 });
+
+describe("a hook whose handler answers nothing", () => {
+  function homeWithHandler(body: string): string {
+    const root = newRoot();
+    mkdirSync(join(root, "dist"), { recursive: true });
+    mkdirSync(join(root, "src", "entrypoints"), { recursive: true });
+    writeFileSync(join(root, "dist", "tool-before.mjs"), body);
+    writeFileSync(join(root, "src", "entrypoints", "tool-before.ts"), body);
+    return root;
+  }
+
+  function launch(home: string, entry = "tool-before") {
+    return spawnSync(process.execPath, [launcher, entry], {
+      encoding: "utf8",
+      input: "{}",
+      env: { ...process.env, TLC_HOME: home },
+    });
+  }
+
+  test("a handler that crashes with empty stdout still answers {} and exit 0", () => {
+    const result = launch(homeWithHandler("process.exit(3);\n"));
+
+    assert.equal(result.stdout.trim(), "{}");
+    assert.equal(result.status, 0);
+    assert.match(result.stderr, /tlc:/);
+  });
+
+  test("a handler that exits 0 with empty stdout still answers {}", () => {
+    const result = launch(homeWithHandler("process.exit(0);\n"));
+
+    assert.equal(result.stdout.trim(), "{}");
+    assert.equal(result.status, 0);
+  });
+
+  test("a handler's verdict passes through unchanged", () => {
+    const result = launch(homeWithHandler('process.stdout.write(\'{"permission":"deny"}\');\n'));
+
+    assert.equal(result.stdout, '{"permission":"deny"}');
+    assert.equal(result.status, 0);
+  });
+});

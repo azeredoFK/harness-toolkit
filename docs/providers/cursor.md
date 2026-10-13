@@ -13,7 +13,8 @@ Source: `src/providers/cursor/`.
 ## Detection
 
 `cursor.detect.ts`: a raw hook payload is Cursor's when `hook_event_name` is camelCase (e.g.
-`beforeShellExecution`) and `workspace_roots` is an array.
+`beforeShellExecution`). `workspace_roots` is read when present but not required: a payload without it used to
+match no provider and be answered with nothing, which Cursor's fail-closed hooks treat as a deny.
 
 ## Capability descriptor
 
