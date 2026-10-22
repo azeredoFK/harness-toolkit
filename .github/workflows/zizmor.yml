@@ -36,7 +36,7 @@ jobs:
       # why: `online-audits: false` keeps this offline and deterministic — the online audits resolve actions against
       # the GitHub API, which makes the verdict depend on rate limits. `min-severity: high` is what this repository
       # can hold at zero today; lowering it is a separate change with findings to read first.
-      - uses: zizmorcore/zizmor-action@cc914d7f3750a2d13d75c7f184a1060aa0e9d482 # v0.6.4
+      - uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
         with:
           online-audits: false
           config: .github/zizmor.yml
