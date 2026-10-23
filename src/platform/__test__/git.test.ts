@@ -1,6 +1,14 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  realpathSync,
+  rmSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
@@ -589,7 +597,9 @@ describe("linkedWorktreeMainRoot", () => {
       git(main, ["add", "a.txt"]);
       git(main, ["commit", "-q", "-m", "init"]);
       git(main, ["worktree", "add", "-q", linked]);
-      assert.equal(linkedWorktreeMainRoot(linked), main);
+      const found = linkedWorktreeMainRoot(linked);
+      assert.ok(found);
+      assert.equal(realpathSync.native(found), realpathSync.native(main));
     } finally {
       rmSync(main, { recursive: true, force: true });
       rmSync(dirname(linked), { recursive: true, force: true });
