@@ -113,7 +113,7 @@ For a rail, the operator changes it from their own terminal, outside the agent s
 
 ```bash
 tlc harness mode solo          # leave the paired posture
-tlc harness pause              # disable stop checks while exploring
+tlc harness pause              # circuit breaker: every hook steps aside, only the floor runs
 tlc harness policy accept --all  # after you edited config mid-session
 ```
 

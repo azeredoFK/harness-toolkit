@@ -6,11 +6,11 @@ import { dirname, join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import type { Decision, HarnessEvent } from "../../contracts/index.ts";
 import { coreFacade } from "../../core/index.ts";
-import { projectConfigPath } from "../../platform/paths.ts";
+import { flagsDir, projectConfigPath } from "../../platform/paths.ts";
 import type { ProviderPort } from "../../providers/index.ts";
 import { providers } from "../../providers/index.ts";
 import { runHandler } from "../run.ts";
-import { toolBeforeHandler } from "../tool-before.ts";
+import { floorVerdict, toolBeforeHandler } from "../tool-before.ts";
 
 function tempRoot(): string {
   return mkdtempSync(join(tmpdir(), "tlc-tool-before-"));
@@ -56,6 +56,80 @@ after(() => {
 function stdinOf(text: string) {
   return { readStdin: () => Promise.resolve(text) };
 }
+
+function pauseProject(root: string): void {
+  mkdirSync(flagsDir(root), { recursive: true });
+  writeFileSync(coreFacade.policy.pauseFlagPath(root), "");
+  coreFacade.policy.refreshPolicyBaselines(root);
+}
+
+test("paused, the floor still refuses a shell write to the policy surface", async () => {
+  const root = tempRoot();
+  try {
+    pauseProject(root);
+    const outcome = await runHandler(
+      toolBeforeHandler,
+      stdinOf(claudeShell(root, "python3 -c \"open('.tlc/harness/config.json','w')\"")),
+      floorVerdict,
+    );
+    assert.equal(outcome.decision.kind, "deny");
+    assert.match(
+      outcome.decision.kind === "deny" ? outcome.decision.reason : "",
+      /rule=policy-surface-write/,
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("paused, an ordinary shell command passes without the rails", async () => {
+  const root = tempRoot();
+  try {
+    pauseProject(root);
+    let ran = false;
+    const outcome = await runHandler(
+      () => {
+        ran = true;
+        return { kind: "deny", reason: "rail", rule: "test" };
+      },
+      stdinOf(claudeShell(root, "git status")),
+      floorVerdict,
+    );
+    assert.equal(ran, false);
+    assert.equal(outcome.decision.kind, "allow");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("pausing the main checkout pauses an agent working in its linked worktree", async () => {
+  const main = tempRoot();
+  const linked = `${main}-wt`;
+  try {
+    execFileSync("git", ["init", "-q"], { cwd: main });
+    execFileSync(
+      "git",
+      ["-c", "user.email=t@e.st", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "i"],
+      { cwd: main },
+    );
+    execFileSync("git", ["worktree", "add", "-q", linked], { cwd: main });
+    writeProjectPolicy(linked, {});
+    pauseProject(main);
+    let ran = false;
+    await runHandler(
+      () => {
+        ran = true;
+        return { kind: "allow" };
+      },
+      stdinOf(claudeShell(linked, "git status")),
+      floorVerdict,
+    );
+    assert.equal(ran, false);
+  } finally {
+    rmSync(main, { recursive: true, force: true });
+    rmSync(linked, { recursive: true, force: true });
+  }
+});
 
 function writeProjectPolicy(root: string, patch: Record<string, unknown>): void {
   const path = projectConfigPath(root);

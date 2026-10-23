@@ -2,13 +2,14 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { describe, test } from "node:test";
 import {
   diffProposedAgainstDisk,
   filterCodeTargets,
   filterTestTargets,
   gitRootOf,
+  linkedWorktreeMainRoot,
   listAddedLines,
   listChangedRepoFiles,
   listCommitFileSets,
@@ -576,5 +577,34 @@ describe("gitRootOf", () => {
 
     git(main, ["worktree", "remove", "--force", worktree]);
     rmSync(main, { recursive: true, force: true });
+  });
+});
+
+describe("linkedWorktreeMainRoot", () => {
+  test("names the main checkout of a linked worktree", () => {
+    const main = initRepo();
+    const linked = join(mkdtempSync(join(tmpdir(), "git-linked-")), "wt");
+    try {
+      writeFileSync(join(main, "a.txt"), "a\n");
+      git(main, ["add", "a.txt"]);
+      git(main, ["commit", "-q", "-m", "init"]);
+      git(main, ["worktree", "add", "-q", linked]);
+      assert.equal(linkedWorktreeMainRoot(linked), main);
+    } finally {
+      rmSync(main, { recursive: true, force: true });
+      rmSync(dirname(linked), { recursive: true, force: true });
+    }
+  });
+
+  test("is null for a main checkout and for a directory outside git", () => {
+    const main = initRepo();
+    const plain = mkdtempSync(join(tmpdir(), "no-git-"));
+    try {
+      assert.equal(linkedWorktreeMainRoot(main), null);
+      assert.equal(linkedWorktreeMainRoot(plain), null);
+    } finally {
+      rmSync(main, { recursive: true, force: true });
+      rmSync(plain, { recursive: true, force: true });
+    }
   });
 });

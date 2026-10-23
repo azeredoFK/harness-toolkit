@@ -1,10 +1,10 @@
 import assert from "node:assert/strict";
-import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { coreFacade } from "../../core/index.ts";
-import { projectStateDir } from "../../platform/paths.ts";
+import { flagsDir, presenceDir, projectStateDir } from "../../platform/paths.ts";
 import { CONTEXT_BUDGET_CHARS, claimsFile, runHandler } from "../run.ts";
 
 function tempRoot(): string {
@@ -516,6 +516,103 @@ test("an allow decision renders the provider's exact allow output", async () => 
     assert.equal(outcome.decision.kind, "allow");
     assert.equal(outcome.rendered.stdout, '{"permission":"allow"}');
     assert.equal(outcome.rendered.exitCode, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+function pause(root: string): void {
+  mkdirSync(flagsDir(root), { recursive: true });
+  writeFileSync(coreFacade.policy.pauseFlagPath(root), "");
+  coreFacade.policy.refreshPolicyBaselines(root);
+}
+
+test("a paused project never reaches the handler and answers Cursor with {}", async () => {
+  const root = tempRoot();
+  try {
+    pause(root);
+    let ran = false;
+    const outcome = await runHandler(
+      () => {
+        ran = true;
+        return { kind: "deny", reason: "should not run", rule: "test" };
+      },
+      stdinOf(JSON.stringify(cursorShellPayload(root))),
+    );
+    assert.equal(ran, false);
+    assert.equal(outcome.decision.kind, "abstain");
+    assert.equal(outcome.rendered.stdout, "{}");
+    assert.equal(outcome.rendered.exitCode, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a paused project writes no obs record and no presence heartbeat", async () => {
+  const root = tempRoot();
+  try {
+    pause(root);
+    await runHandler(() => ({ kind: "allow" }), stdinOf(JSON.stringify(cursorShellPayload(root))));
+    assert.deepEqual(obsRecords(root), []);
+    assert.equal(existsSync(presenceDir(root)), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a paused project still answers with the whilePaused verdict", async () => {
+  const root = tempRoot();
+  try {
+    pause(root);
+    const outcome = await runHandler(
+      () => ({ kind: "allow" }),
+      stdinOf(JSON.stringify(claudePayload(root))),
+      () => ({ kind: "deny", reason: "floor", rule: "test" }),
+    );
+    assert.equal(outcome.decision.kind, "deny");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a whilePaused handler that throws abstains instead of breaking the hook", async () => {
+  const root = tempRoot();
+  try {
+    pause(root);
+    const outcome = await runHandler(
+      () => ({ kind: "allow" }),
+      stdinOf(JSON.stringify(cursorShellPayload(root))),
+      () => {
+        throw new Error("boom");
+      },
+    );
+    assert.equal(outcome.decision.kind, "abstain");
+    assert.equal(outcome.rendered.stdout, "{}");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a pause flag written behind the session's back is not a pause", async () => {
+  const root = tempRoot();
+  try {
+    const first = await runHandler(
+      () => ({ kind: "allow" }),
+      stdinOf(JSON.stringify(cursorShellPayload(root))),
+    );
+    assert.ok(first.event);
+    coreFacade.policy.recordPolicyBaseline(root, first.event.sessionKey);
+    mkdirSync(flagsDir(root), { recursive: true });
+    writeFileSync(coreFacade.policy.pauseFlagPath(root), "");
+    let ran = false;
+    await runHandler(
+      () => {
+        ran = true;
+        return { kind: "allow" };
+      },
+      stdinOf(JSON.stringify(cursorShellPayload(root))),
+    );
+    assert.equal(ran, true);
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

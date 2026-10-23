@@ -486,7 +486,7 @@ See `tlc harness help architecture` or [`docs/architecture.md`](docs/architectur
 | `tlc harness build` | Compile `dist/` for the Node fallback path |
 | `tlc harness test` | Run the full local gate |
 | `tlc harness grind [on\|off]` | Lint/test follow-ups on stop |
-| `tlc harness pause` / `resume` | Disable / enable stop checks |
+| `tlc harness pause` / `resume` | Circuit breaker: every hook steps aside except the floor / back on |
 | `tlc harness mode solo\|paired\|focus` | Operator posture |
 | `tlc harness attest` | Tamper-evident record of what each session ran under |
 | `tlc harness handoff` | Handoff state between turns and sessions — the sanctioned reader |

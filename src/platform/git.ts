@@ -58,6 +58,21 @@ export async function gitCommonDirOf(dir: string): Promise<string | null> {
   }
 }
 
+export function linkedWorktreeMainRoot(root: string): string | null {
+  let text: string;
+  try {
+    text = readFileSync(join(root, ".git"), "utf8");
+  } catch {
+    return null;
+  }
+  const pointer = /^gitdir:\s*(.+)$/m.exec(text)?.[1]?.trim();
+  if (!pointer) {
+    return null;
+  }
+  const main = /^(.*)[\\/]\.git[\\/]worktrees[\\/][^\\/]+[\\/]?$/.exec(resolve(root, pointer))?.[1];
+  return main ? main : null;
+}
+
 async function gitLines(projectDir: string, args: string[]): Promise<string[]> {
   const result = await runProcess({ command: ["git", ...args], cwd: projectDir });
   if (result.exitCode !== 0) {

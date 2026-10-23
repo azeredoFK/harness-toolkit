@@ -132,8 +132,10 @@ findings without deleting tests, which on a malformed command sends it to edit h
 
 ## pause / resume
 
-`tlc harness pause` disables stop checks (grind + ship challenge). Use when exploring or mid-refactor.
-`tlc harness resume` turns them back on.
+`tlc harness pause` is the circuit breaker: every hook steps aside and answers at once, reading no policy and
+writing no state. Only the floor still runs, so a paused session still cannot rewrite the policy it will resume
+under. Pausing a repository also pauses the agents working in its linked worktrees. `tlc harness resume` turns
+the harness back on.
 
 Run both from your own terminal. Inside an agent session they are denied by the floor rule
 `policy-surface-write`: policy is the operator's to change, and a stop check the agent can switch off is not a

@@ -146,6 +146,7 @@ import {
   resolveProjectSyncMode,
 } from "./policy/policy.loader.ts";
 import { operatorBootstrapLines } from "./policy/policy.operator.ts";
+import { isPaused, pauseFlagPath } from "./policy/policy.pause.ts";
 import { isOperatorMode, OPERATOR_MODES } from "./policy/policy.posture.ts";
 import { activeRails } from "./policy/policy.rails.ts";
 import { pruneShadowed, shadowedKeys, typeMismatches, unknownKeys } from "./policy/policy.shadow.ts";
@@ -438,6 +439,8 @@ export const coreFacade = {
     acceptPolicySources,
     divergedPaths,
     allDivergedPaths,
+    isPaused,
+    pauseFlagPath,
     activeRails,
     operatorBootstrapLines,
     loadPolicy,

@@ -51,8 +51,9 @@ a green light nobody earned. So a silent harness shows up as a healthy-looking s
 tlc harness doctor
 ```
 
-There is deliberately no switch that turns the harness off. `tlc harness pause` disables the stop checks; the floor
-and the action-time rails keep running, because a limit an agent can turn off is not a limit.
+`tlc harness pause` is the operator's circuit breaker: every hook steps aside without reading policy or writing
+state, and only the floor keeps running, because a limit an agent can turn off is not a limit. A pause flag that
+appears without the CLI is a policy change, not a pause, and is ignored.
 
 ## Node vs Bun
 

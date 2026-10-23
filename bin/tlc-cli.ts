@@ -116,7 +116,7 @@ export function statusScreen(root: string): Screen {
           },
           {
             label: "gates",
-            value: report.gatesPaused ? "PAUSED — stop checks disabled" : "active",
+            value: report.gatesPaused ? "PAUSED — every hook steps aside; only the floor runs" : "active",
             level: report.gatesPaused ? "warn" : "ok",
           },
         ],
@@ -185,13 +185,13 @@ export function setPaused(root: string, on: boolean): string {
   if (on) {
     writeFileSync(path, "");
     coreFacade.policy.refreshPolicyBaselines(root);
-    return "gates PAUSED — stop checks disabled until `tlc harness resume`";
+    return "harness PAUSED — every hook steps aside (only the floor still runs) until `tlc harness resume`";
   }
   if (existsSync(path)) {
     rmSync(path);
   }
   coreFacade.policy.refreshPolicyBaselines(root);
-  return "gates ACTIVE again";
+  return "harness ACTIVE again";
 }
 
 /**

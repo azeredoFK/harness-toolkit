@@ -23,6 +23,8 @@ export type HandlerContext = {
 
 export type Handler = (event: HarnessEvent, ctx: HandlerContext) => Decision | Promise<Decision>;
 
+export type PausedHandler = (event: HarnessEvent, protectedPaths: string[]) => Decision;
+
 export type RunIo = {
   readStdin?: () => Promise<string>;
   now?: () => Date;
@@ -151,7 +153,33 @@ function asRecord(value: unknown): Record<string, unknown> {
     : {};
 }
 
-export async function runHandler(handler: Handler, io: RunIo = {}): Promise<RunOutcome> {
+function isPausedSafely(event: HarnessEvent): boolean {
+  try {
+    return coreFacade.policy.isPaused(event.projectDir, event.sessionKey);
+  } catch {
+    return false;
+  }
+}
+
+function pausedDecision(event: HarnessEvent, whilePaused: PausedHandler | undefined): Decision {
+  if (!whilePaused) {
+    return { kind: "abstain" };
+  }
+  try {
+    return whilePaused(
+      event,
+      providerRegistry.flatMap((p) => p.wiringTargets()),
+    );
+  } catch {
+    return { kind: "abstain" };
+  }
+}
+
+export async function runHandler(
+  handler: Handler,
+  io: RunIo = {},
+  whilePaused?: PausedHandler,
+): Promise<RunOutcome> {
   const readStdin = io.readStdin ?? readStdinText;
   const now = io.now ? io.now() : new Date();
   const abstainRendered: Rendered = { stdout: "{}", exitCode: 0 };
@@ -191,6 +219,12 @@ export async function runHandler(handler: Handler, io: RunIo = {}): Promise<RunO
   }
 
   const capabilities = provider.capabilities();
+  if (isPausedSafely(event)) {
+    const decision = degrade(pausedDecision(event, whilePaused), event, capabilities, {
+      contextBudgetChars: CONTEXT_BUDGET_CHARS,
+    });
+    return { event, decision, rendered: provider.render(decision, event) };
+  }
   recordHookEnter(event);
 
   try {
@@ -239,8 +273,8 @@ export async function runHandler(handler: Handler, io: RunIo = {}): Promise<RunO
   }
 }
 
-export async function main(handler: Handler): Promise<void> {
-  const outcome = await runHandler(handler);
+export async function main(handler: Handler, whilePaused?: PausedHandler): Promise<void> {
+  const outcome = await runHandler(handler, {}, whilePaused);
   if (outcome.rendered.stdout !== null) {
     const text = outcome.rendered.stdout;
     process.stdout.write(text.endsWith("\n") ? text : `${text}\n`);
