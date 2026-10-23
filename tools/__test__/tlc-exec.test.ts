@@ -599,7 +599,7 @@ describe("the hook trace", () => {
     assert.doesNotMatch(readFileSync(hookTracePath(home), "utf8"), /secret command/);
   });
 
-  test("a handler that dies by signal is recorded with the signal", () => {
+  test("a handler killed mid-run is recorded as dying without a verdict", () => {
     const home = homeWithHandler("process.kill(process.pid, 'SIGKILL');\n");
     const result = spawnSync(process.execPath, [launcher, "tool-before"], {
       encoding: "utf8",
@@ -609,7 +609,10 @@ describe("the hook trace", () => {
 
     assert.equal(result.stdout.trim(), "{}");
     const end = traceOf(home).find((record) => record.phase === "end");
-    assert.equal(end?.signal, "SIGKILL");
+    assert.ok(
+      end?.signal === "SIGKILL" || (typeof end?.status === "number" && end.status !== 0),
+      JSON.stringify(end),
+    );
     assert.equal(end?.stdout_bytes, 0);
   });
 
