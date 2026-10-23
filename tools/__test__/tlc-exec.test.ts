@@ -14,10 +14,14 @@ import { delimiter, join } from "node:path";
 import { afterEach, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
+  appendHookTrace,
   decideRuntime,
   entrySourceCandidates,
   findBunOnPath,
   HOOK_ENTRIES,
+  HOOK_TRACE_MAX_BYTES,
+  hookIdentity,
+  hookTracePath,
   isPackagedCopy,
   MIN_NODE_MAJOR,
   resolveBunPath,
@@ -523,5 +527,114 @@ describe("a hook whose handler answers nothing", () => {
 
     assert.equal(result.stdout, '{"permission":"deny"}');
     assert.equal(result.status, 0);
+  });
+});
+
+describe("the hook trace", () => {
+  function homeWithHandler(body: string): string {
+    const root = newRoot();
+    mkdirSync(join(root, "dist"), { recursive: true });
+    mkdirSync(join(root, "src", "entrypoints"), { recursive: true });
+    writeFileSync(join(root, "dist", "tool-before.mjs"), body);
+    writeFileSync(join(root, "src", "entrypoints", "tool-before.ts"), body);
+    return root;
+  }
+
+  function traceOf(home: string): Array<Record<string, unknown>> {
+    return readFileSync(hookTracePath(home), "utf8")
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+  }
+
+  const payload = JSON.stringify({
+    hook_event_name: "preToolUse",
+    tool_name: "Read",
+    tool_use_id: "tu-1",
+    generation_id: "gen-1",
+    conversation_id: "conv-1",
+    tool_input: { command: "secret command" },
+  });
+
+  test("a hook records a start and an end that name the tool call and the verdict", () => {
+    const home = homeWithHandler('process.stdout.write(\'{"permission":"allow"}\');\n');
+    const result = spawnSync(process.execPath, [launcher, "tool-before"], {
+      encoding: "utf8",
+      input: payload,
+      env: { ...process.env, TLC_HOME: home },
+    });
+
+    assert.equal(result.stdout, '{"permission":"allow"}');
+    const [start, end] = traceOf(home);
+    assert.equal(start?.phase, "start");
+    assert.equal(start?.tool_use_id, "tu-1");
+    assert.equal(start?.event, "preToolUse");
+    assert.equal(start?.stdin_bytes, Buffer.byteLength(payload));
+    assert.equal(end?.phase, "end");
+    assert.equal(end?.status, 0);
+    assert.equal(end?.verdict, '{"permission":"allow"}');
+  });
+
+  test("the handler still receives the payload the host sent", () => {
+    const home = homeWithHandler(
+      "let s='';process.stdin.on('data',c=>s+=c).on('end',()=>process.stdout.write(JSON.stringify({len:s.length})));\n",
+    );
+    const result = spawnSync(process.execPath, [launcher, "tool-before"], {
+      encoding: "utf8",
+      input: payload,
+      env: { ...process.env, TLC_HOME: home },
+    });
+
+    assert.equal(result.stdout, JSON.stringify({ len: payload.length }));
+  });
+
+  test("the trace never carries the tool input", () => {
+    const home = homeWithHandler("process.stdout.write('{}');\n");
+    spawnSync(process.execPath, [launcher, "tool-before"], {
+      encoding: "utf8",
+      input: payload,
+      env: { ...process.env, TLC_HOME: home },
+    });
+
+    assert.doesNotMatch(readFileSync(hookTracePath(home), "utf8"), /secret command/);
+  });
+
+  test("a handler that dies by signal is recorded with the signal", () => {
+    const home = homeWithHandler("process.kill(process.pid, 'SIGKILL');\n");
+    const result = spawnSync(process.execPath, [launcher, "tool-before"], {
+      encoding: "utf8",
+      input: payload,
+      env: { ...process.env, TLC_HOME: home },
+    });
+
+    assert.equal(result.stdout.trim(), "{}");
+    const end = traceOf(home).find((record) => record.phase === "end");
+    assert.equal(end?.signal, "SIGKILL");
+    assert.equal(end?.stdout_bytes, 0);
+  });
+
+  test("a command is not traced", () => {
+    const home = homeWithHandler("process.stdout.write('{}');\n");
+    spawnSync(process.execPath, [launcher, "doctor"], {
+      encoding: "utf8",
+      input: "",
+      env: { ...process.env, TLC_HOME: home },
+    });
+
+    assert.equal(existsSync(hookTracePath(home)), false);
+  });
+
+  test("the trace rotates once it passes its cap instead of growing without bound", () => {
+    const home = newRoot();
+    mkdirSync(join(home, "state"), { recursive: true });
+    writeFileSync(hookTracePath(home), "x".repeat(HOOK_TRACE_MAX_BYTES + 1));
+    appendHookTrace(home, { phase: "start" });
+
+    assert.equal(existsSync(`${hookTracePath(home)}.1`), true);
+    assert.equal(traceOf(home).length, 1);
+  });
+
+  test("an unparseable payload is recorded as such, not guessed", () => {
+    assert.deepEqual(hookIdentity(Buffer.from("not json")), { parse_error: true });
   });
 });

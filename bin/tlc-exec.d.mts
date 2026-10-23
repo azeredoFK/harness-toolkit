@@ -59,3 +59,21 @@ export function decideRuntime(input: RuntimeDecisionInput): RuntimeDecision;
 
 export function main(argv?: string[]): void;
 export const HOOK_ENTRIES: Set<string>;
+
+export const HOOK_TRACE_MAX_BYTES: number;
+
+export function hookTracePath(harnessHome: string): string;
+
+export function appendHookTrace(harnessHome: string, record: Record<string, unknown>): void;
+
+export type HookIdentity =
+  | {
+      event?: string;
+      tool?: string;
+      tool_use_id?: string;
+      generation_id?: string;
+      conversation_id?: string;
+    }
+  | { parse_error: true };
+
+export function hookIdentity(input: Buffer): HookIdentity;

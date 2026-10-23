@@ -55,6 +55,19 @@ tlc harness doctor
 state, and only the floor keeps running, because a limit an agent can turn off is not a limit. A pause flag that
 appears without the CLI is a policy change, not a pause, and is ignored.
 
+## The host says a hook returned no output
+
+Every hook invocation leaves two lines in `~/.tlc/harness/state/hook-trace.jsonl`: `start`, written by the launcher
+before the handler runs, and `end`, with the duration, exit status, signal and the verdict it printed. Each line
+carries the host's `tool_use_id`, `generation_id` and `conversation_id`, never the tool input, so a refusal the host
+reports can be matched to the invocation that produced it:
+
+- no `start` for that tool call: the host never ran the launcher, or it died before its first line;
+- a `start` with no `end`: the process was killed mid-run, usually by the host's own timeout;
+- an `end` with a verdict: the harness answered, and the host discarded it.
+
+The file rotates to `hook-trace.jsonl.1` at 5 MB.
+
 ## Node vs Bun
 
 - Preferred: **Bun** on PATH — every hook runs the TypeScript source directly, ~1 ms per invocation.

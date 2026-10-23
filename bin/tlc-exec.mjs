@@ -1,6 +1,16 @@
 #!/usr/bin/env node
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readFileSync, realpathSync, writeFileSync, writeSync } from "node:fs";
+import {
+  appendFileSync,
+  existsSync,
+  mkdirSync,
+  readFileSync,
+  realpathSync,
+  renameSync,
+  statSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -191,6 +201,52 @@ function carryOn() {
   process.exit(0);
 }
 
+export const HOOK_TRACE_MAX_BYTES = 5 * 1024 * 1024;
+
+export function hookTracePath(harnessHome) {
+  return join(harnessHome, "state", "hook-trace.jsonl");
+}
+
+export function appendHookTrace(harnessHome, record) {
+  if (isPackagedCopy(harnessHome)) {
+    return;
+  }
+  try {
+    const path = hookTracePath(harnessHome);
+    mkdirSync(dirname(path), { recursive: true });
+    try {
+      if (statSync(path).size > HOOK_TRACE_MAX_BYTES) {
+        renameSync(path, `${path}.1`);
+      }
+    } catch {}
+    appendFileSync(path, `${JSON.stringify({ ts: new Date().toISOString(), pid: process.pid, ...record })}\n`);
+  } catch {}
+}
+
+export function hookIdentity(input) {
+  try {
+    const parsed = JSON.parse(input.toString("utf8"));
+    const pick = (key) => (typeof parsed?.[key] === "string" ? parsed[key] : undefined);
+    return {
+      event: pick("hook_event_name"),
+      tool: pick("tool_name"),
+      tool_use_id: pick("tool_use_id"),
+      generation_id: pick("generation_id"),
+      conversation_id: pick("conversation_id") ?? pick("session_id"),
+    };
+  } catch {
+    return { parse_error: true };
+  }
+}
+
+function readHookInput() {
+  try {
+    return { input: readFileSync(0) };
+  } catch (error) {
+    return { input: null, error: error instanceof Error ? error.message : String(error) };
+  }
+}
+
 export function decideRuntime({ harnessHome, entry, bunPath, nodeMajor, distExists, srcPath }) {
   const distPath = join(harnessHome, "dist", `${entry}.mjs`);
   if (bunPath && srcPath && distExists) {
@@ -236,8 +292,24 @@ export function decideRuntime({ harnessHome, entry, bunPath, nodeMajor, distExis
 
 function run(harnessHome, command, commandArgs, origin = harnessHome, entry = "") {
   const isHook = HOOK_ENTRIES.has(entry);
+  const started = Date.now();
+  const hookInput = isHook ? readHookInput() : { input: null };
+  if (isHook) {
+    appendHookTrace(harnessHome, {
+      phase: "start",
+      entry,
+      ppid: process.ppid,
+      cwd: process.cwd(),
+      node: process.version,
+      uptime_ms: Math.round(process.uptime() * 1000),
+      stdin_bytes: hookInput.input?.length ?? null,
+      stdin_error: hookInput.error,
+      ...(hookInput.input ? hookIdentity(hookInput.input) : {}),
+    });
+  }
   const result = spawnSync(command, commandArgs, {
-    stdio: isHook ? ["inherit", "pipe", "inherit"] : "inherit",
+    ...(hookInput.input ? { input: hookInput.input } : {}),
+    stdio: isHook ? [hookInput.input ? "pipe" : "inherit", "pipe", "inherit"] : "inherit",
     maxBuffer: 64 * 1024 * 1024,
     // why: `TLC_ORIGIN` is where this copy physically lives, which is not `TLC_HOME` once an npm-installed shim
     // is driving the runtime installed under the conventional path. `tlc harness install` needs the former as
@@ -254,6 +326,18 @@ function run(harnessHome, command, commandArgs, origin = harnessHome, entry = ""
     },
     shell: false,
   });
+  if (isHook) {
+    appendHookTrace(harnessHome, {
+      phase: "end",
+      entry,
+      ms: Date.now() - started,
+      status: result.status,
+      signal: result.signal,
+      spawn_error: result.error?.message,
+      stdout_bytes: result.stdout?.length ?? 0,
+      verdict: result.stdout?.toString("utf8").trim().slice(0, 60),
+    });
+  }
   if (result.error) {
     console.error(`tlc: failed to start ${command}: ${result.error.message}`);
     if (HOOK_ENTRIES.has(entry)) {
@@ -283,6 +367,14 @@ export function main(argv = process.argv) {
     console.error("usage: tlc-exec <entry> [args...]");
     console.error("  entry: session-start | tool-before | stop | doctor | ...");
     process.exit(2);
+  }
+  if (HOOK_ENTRIES.has(entry)) {
+    process.on("uncaughtException", (error) => {
+      const detail = error instanceof Error ? (error.stack ?? error.message) : String(error);
+      appendHookTrace(harnessHome, { phase: "crash", entry, error: detail.slice(0, 500) });
+      console.error(`tlc: ${entry} launcher failed (${detail.split("\n")[0]}); carrying on without a verdict.`);
+      carryOn();
+    });
   }
   const args = argv.slice(3);
 
