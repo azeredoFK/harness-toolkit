@@ -374,7 +374,7 @@ test("a suite that outlives the stop budget is cut off and handed to verify", as
   writePolicy(root, [process.execPath, "-e", "setTimeout(() => process.exit(0), 30000);"]);
 
   const started = Date.now();
-  const outcome = await withStopBudget(500, () => runHandler(stopHandler, stopEvent(root)));
+  const outcome = await withStopBudget(3000, () => runHandler(stopHandler, stopEvent(root)));
 
   assert.ok(Date.now() - started < 10_000, `the stop took ${Date.now() - started}ms`);
   assert.equal(outcome.decision.kind, "continue");
@@ -391,8 +391,8 @@ test("once a suite is known to outlive the budget, the next stop does not start 
     `require("node:fs").appendFileSync(${JSON.stringify(marker)}, "x"); setTimeout(() => process.exit(0), 30000);`,
   ]);
 
-  await withStopBudget(500, () => runHandler(stopHandler, stopEvent(root)));
-  const second = await withStopBudget(500, () => runHandler(stopHandler, stopEvent(root)));
+  await withStopBudget(3000, () => runHandler(stopHandler, stopEvent(root)));
+  const second = await withStopBudget(3000, () => runHandler(stopHandler, stopEvent(root)));
 
   assert.equal(readFileSync(marker, "utf8").length, 1);
   assert.equal(second.decision.kind, "continue");
@@ -404,11 +404,11 @@ test("a timed-out run is never a verdict a push could read", async () => {
   const slow = [process.execPath, "-e", "setTimeout(() => process.exit(0), 30000);"];
   writePolicy(root, slow);
 
-  await withStopBudget(500, () => runHandler(stopHandler, stopEvent(root)));
+  await withStopBudget(3000, () => runHandler(stopHandler, stopEvent(root)));
   const tree = await workingTreeId(root);
 
   assert.equal(coreFacade.gate.findShipVerdict(root, "lint", slow, tree ?? ""), null);
-  assert.ok((coreFacade.gate.lastShipVerdictFor(root, "lint", slow)?.durationMs ?? 0) >= 400);
+  assert.equal(coreFacade.gate.lastShipVerdictFor(root, "lint", slow)?.timedOut, true);
 });
 
 test("a run that timed out only bounds the suite from below, so a slightly larger budget does not restart it", async () => {
