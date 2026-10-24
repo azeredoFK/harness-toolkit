@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 import { coreFacade } from "../../core/index.ts";
+import { workingTreeId } from "../../platform/git.ts";
 import { projectConfigPath } from "../../platform/paths.ts";
 import { runHandler } from "../run.ts";
 import { stopHandler } from "../stop.ts";
@@ -245,7 +246,7 @@ test("a reused failure still advances the stagnation counter", async () => {
  * same value the remaining files alone would produce. Recording it would let a later complete run collide with a
  * verdict produced without seeing every input ([/decisions/ad-045.md](/decisions/ad-045.md)).
  */
-test("an unreadable input is never cached, so the gate runs every time", async () => {
+test("an unreadable input never enters the inputs-hash cache; only the tree verdict, which sees it, is reused", async () => {
   process.env.TLC_HOME = newDir("tlc-cache-home-");
   const root = dirtyRepo();
   const gate = countingGate(0);
@@ -256,11 +257,14 @@ test("an unreadable input is never cached, so the gate runs every time", async (
   execFileSync("git", ["-c", "user.email=t@e.c", "-c", "user.name=T", "commit", "-qm", "add"], { cwd: root });
   rmSync(join(root, "src", "gone.ts"));
 
+  const tree = await workingTreeId(root);
+  const head = execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: root, encoding: "utf8" }).trim();
   await runHandler(stopHandler, stopEvent(root));
   await runHandler(stopHandler, stopEvent(root));
 
   assert.equal(coreFacade.gate.readLastGate(root, "claude-sess-cache")?.inputsHash, undefined);
-  assert.equal(gate.runs(), 2);
+  assert.notEqual(tree, head, "the tree id records the deletion the inputs hash could not read");
+  assert.equal(gate.runs(), 1, "only the tree verdict, which saw the deletion, is reused");
 });
 
 test("a reused pass is silent", async () => {
@@ -310,4 +314,123 @@ test("the recorded outcome says whether the verdict was reused", async () => {
   assert.equal(outcomes.length, 2);
   assert.equal(outcomes[0]?.attrs.reused, false);
   assert.equal(outcomes[1]?.attrs.reused, true);
+});
+
+async function recordFor(root: string, command: string[], exitCode: number, durationMs = 10): Promise<void> {
+  const tree = await workingTreeId(root);
+  assert.ok(tree);
+  await coreFacade.gate.recordShipVerdict(root, {
+    gate: "lint",
+    command,
+    tree,
+    exitCode,
+    durationMs,
+    output: "recorded",
+    source: coreFacade.gate.VERIFY_SOURCE,
+  });
+}
+
+function withStopBudget<T>(ms: number, run: () => Promise<T>): Promise<T> {
+  const previous = process.env.TLC_TEST_STOP_GATE_BUDGET_MS;
+  process.env.TLC_TEST_STOP_GATE_BUDGET_MS = String(ms);
+  return run().finally(() => {
+    if (previous === undefined) {
+      delete process.env.TLC_TEST_STOP_GATE_BUDGET_MS;
+    } else {
+      process.env.TLC_TEST_STOP_GATE_BUDGET_MS = previous;
+    }
+  });
+}
+
+test("a passing verdict recorded for this tree is reused and the suite does not run", async () => {
+  process.env.TLC_HOME = newDir("tlc-cache-home-");
+  const root = dirtyRepo();
+  const gate = countingGate(1);
+  writePolicy(root, gate.command);
+  await recordFor(root, gate.command, 0);
+
+  const outcome = await runHandler(stopHandler, stopEvent(root));
+
+  assert.equal(gate.runs(), 0);
+  assert.notEqual(outcome.decision.kind, "continue", JSON.stringify(outcome.decision));
+});
+
+test("a failing verdict recorded for this tree fails the stop without running the suite", async () => {
+  process.env.TLC_HOME = newDir("tlc-cache-home-");
+  const root = dirtyRepo();
+  const gate = countingGate(0);
+  writePolicy(root, gate.command);
+  await recordFor(root, gate.command, 1);
+
+  const outcome = await runHandler(stopHandler, stopEvent(root));
+
+  assert.equal(gate.runs(), 0);
+  assert.equal(outcome.decision.kind, "continue");
+});
+
+test("a suite that outlives the stop budget is cut off and handed to verify", async () => {
+  process.env.TLC_HOME = newDir("tlc-cache-home-");
+  const root = dirtyRepo();
+  writePolicy(root, [process.execPath, "-e", "setTimeout(() => process.exit(0), 30000);"]);
+
+  const started = Date.now();
+  const outcome = await withStopBudget(500, () => runHandler(stopHandler, stopEvent(root)));
+
+  assert.ok(Date.now() - started < 10_000, `the stop took ${Date.now() - started}ms`);
+  assert.equal(outcome.decision.kind, "continue");
+  assert.match(outcome.decision.kind === "continue" ? outcome.decision.text : "", /tlc harness verify/);
+});
+
+test("once a suite is known to outlive the budget, the next stop does not start it", async () => {
+  process.env.TLC_HOME = newDir("tlc-cache-home-");
+  const root = dirtyRepo();
+  const marker = join(newDir("tlc-cache-marker-"), "runs.log");
+  writePolicy(root, [
+    process.execPath,
+    "-e",
+    `require("node:fs").appendFileSync(${JSON.stringify(marker)}, "x"); setTimeout(() => process.exit(0), 30000);`,
+  ]);
+
+  await withStopBudget(500, () => runHandler(stopHandler, stopEvent(root)));
+  const second = await withStopBudget(500, () => runHandler(stopHandler, stopEvent(root)));
+
+  assert.equal(readFileSync(marker, "utf8").length, 1);
+  assert.equal(second.decision.kind, "continue");
+});
+
+test("a timed-out run is never a verdict a push could read", async () => {
+  process.env.TLC_HOME = newDir("tlc-cache-home-");
+  const root = dirtyRepo();
+  const slow = [process.execPath, "-e", "setTimeout(() => process.exit(0), 30000);"];
+  writePolicy(root, slow);
+
+  await withStopBudget(500, () => runHandler(stopHandler, stopEvent(root)));
+  const tree = await workingTreeId(root);
+
+  assert.equal(coreFacade.gate.findShipVerdict(root, "lint", slow, tree ?? ""), null);
+  assert.ok((coreFacade.gate.lastShipVerdictFor(root, "lint", slow)?.durationMs ?? 0) >= 400);
+});
+
+test("a run that timed out only bounds the suite from below, so a slightly larger budget does not restart it", async () => {
+  process.env.TLC_HOME = newDir("tlc-cache-home-");
+  const root = dirtyRepo();
+  const gate = countingGate(0);
+  writePolicy(root, gate.command);
+  const tree = await workingTreeId(root);
+  assert.ok(tree);
+  await coreFacade.gate.recordShipVerdict(root, {
+    gate: "lint",
+    command: gate.command,
+    tree,
+    exitCode: 124,
+    durationMs: 1900,
+    output: "(process timed out)",
+    source: "claude-sess-cache",
+    timedOut: true,
+  });
+
+  const outcome = await withStopBudget(2000, () => runHandler(stopHandler, stopEvent(root)));
+
+  assert.equal(gate.runs(), 0);
+  assert.equal(outcome.decision.kind, "continue");
 });

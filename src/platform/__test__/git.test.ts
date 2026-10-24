@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import {
+  chmodSync,
   mkdirSync,
   mkdtempSync,
   readdirSync,
@@ -705,6 +706,21 @@ describe("workingTreeId", () => {
       assert.equal(objectCount(dir), before);
       assert.deepEqual(readFileSync(join(dir, ".git", "index")), index);
     } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an untracked file that cannot be read is skipped instead of losing the id", {
+    skip: process.platform === "win32" || process.getuid?.() === 0,
+  }, async () => {
+    const dir = committedRepo();
+    try {
+      const locked = join(dir, "locked.txt");
+      writeFileSync(locked, "secret\n");
+      chmodSync(locked, 0o000);
+      assert.equal(await workingTreeId(dir), headTree(dir));
+    } finally {
+      chmodSync(join(dir, "locked.txt"), 0o600);
       rmSync(dir, { recursive: true, force: true });
     }
   });

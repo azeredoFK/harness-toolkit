@@ -150,6 +150,11 @@ step. The tree id covers uncommitted and untracked files, so a verdict recorded 
 push of that commit, and any edit after it does not. Linked worktrees share one record with their main checkout. A
 gate that rewrites files while it runs is not recorded, because its verdict describes a tree that no longer exists.
 
+The `stop` grind follows the same rule. It reuses a verdict recorded for the current tree by this session or by
+`tlc harness verify`, and otherwise runs the gate inline within a 90-second budget, ending the whole process tree if
+it overruns. A suite that does not fit is handed back: the turn continues with an instruction to run `tlc harness
+verify`, and the overrun is remembered as an estimate — never as a verdict — so the next stop does not start it again.
+
 ## pause / resume
 
 `tlc harness pause` is the circuit breaker: every hook steps aside and answers at once, reading no policy and

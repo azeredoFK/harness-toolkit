@@ -135,7 +135,8 @@ function recordGateDeferred(args: {
  */
 export type GateRun =
   | { kind: "ran"; artifact: LastGateArtifact; reused: boolean }
-  | { kind: "deferred"; holder: string };
+  | { kind: "deferred"; holder: string }
+  | { kind: "slow"; estimateMs: number; budgetMs: number };
 
 /**
  * hazard: `GATE_LOCK_WAIT_MS` is 120 000 and the Stop hook is registered with `timeoutSeconds: 120`, so waiting
@@ -143,6 +144,15 @@ export type GateRun =
  * the share of the budget a neighbour may spend before the turn stops waiting for it.
  */
 export const STOP_LOCK_WAIT_MS = 10_000;
+
+export const STOP_GATE_BUDGET_MS = 90_000;
+
+const TIMED_OUT_HEADROOM = 1.25;
+
+export function stopGateBudgetMs(env: NodeJS.ProcessEnv = process.env): number {
+  const declared = Number(env.TLC_TEST_STOP_GATE_BUDGET_MS);
+  return Number.isFinite(declared) && declared > 0 ? declared : STOP_GATE_BUDGET_MS;
+}
 
 /**
  * why: a test that proves the wait has to wait, and a suite that pays ten seconds for it pays that on every gate
@@ -192,19 +202,7 @@ async function creditPendingLessons(args: {
  * ([/decisions/ad-116.md](/decisions/ad-116.md)) can ask the identical question `stop` asks — same lock, same
  * content-hash cache, same observability. A second implementation is the drift AD-071 already named once.
  */
-export async function runLockedGate(args: {
-  root: string;
-  shaRoot: string;
-  provider: string;
-  session: string;
-  gate: "lint" | "test" | "docs";
-  command: string[];
-  argvFiles: string[];
-  recordFiles: string[];
-  sessionKey: string;
-  policy: Policy;
-  pendingCredit: PendingLessonCredit | undefined;
-}): Promise<GateRun> {
+export async function runLockedGate(args: LockedGateArgs): Promise<GateRun> {
   const command = [...args.command, ...args.argvFiles];
   // why: `args.recordFiles`/`args.argvFiles` are the turn's changed files, resolved against `shaRoot` — the
   // same split AD-129 already applied to diffing. Hashing or running against `args.root` instead reads a
@@ -218,39 +216,30 @@ export async function runLockedGate(args: {
   );
 
   let artifact: LastGateArtifact;
+  let reused = cached !== null;
+  const tree = cached === null ? await workingTreeId(args.shaRoot) : null;
+  const recorded = recordedVerdictFor(args, tree);
   if (cached !== null) {
     artifact = cached;
+  } else if (recorded !== null) {
+    reused = true;
+    artifact = writeArtifact(args, command, inputs, {
+      exitCode: recorded.exitCode,
+      durationMs: recorded.durationMs,
+      output: recorded.outputTail,
+    });
   } else {
+    const slow = overBudget(args);
+    if (slow !== null) {
+      return slow;
+    }
+    let ran: LastGateArtifact | { timedOutAfterMs: number };
     try {
-      artifact = await coreFacade.gate.withGateLock(
+      ran = await coreFacade.gate.withGateLock(
         args.root,
         args.provider,
         args.session,
-        async () => {
-          const treeBefore = await workingTreeId(args.shaRoot);
-          const result = await runCommand(args.shaRoot, args.command, args.argvFiles);
-          if (treeBefore !== null && (await workingTreeId(args.shaRoot)) === treeBefore) {
-            await coreFacade.gate.recordShipVerdict(args.root, {
-              gate: args.gate,
-              command: args.command,
-              tree: treeBefore,
-              exitCode: result.exitCode,
-              durationMs: result.durationMs,
-              output: result.output,
-            });
-          }
-          return coreFacade.gate.writeLastGate({
-            root: args.root,
-            sessionKey: args.sessionKey,
-            gate: args.gate,
-            exitCode: result.exitCode,
-            command,
-            files: args.recordFiles,
-            durationMs: result.durationMs,
-            output: result.output,
-            ...(inputs.complete ? { inputsHash: inputs.hash } : {}),
-          });
-        },
+        () => runAndRecord(args, command, inputs, tree),
         { waitMs: stopLockWaitMs() },
       );
     } catch (error) {
@@ -263,10 +252,14 @@ export async function runLockedGate(args: {
       recordGateDeferred({ ...args, holder });
       return { kind: "deferred", holder };
     }
+    if ("timedOutAfterMs" in ran) {
+      return { kind: "slow", estimateMs: ran.timedOutAfterMs, budgetMs: ran.timedOutAfterMs };
+    }
+    artifact = ran;
   }
 
   // invariant: recorded outside the lock. A measurement must not widen the window in which one gate blocks another.
-  recordGateOutcome({ ...args, artifact, reused: cached !== null });
+  recordGateOutcome({ ...args, artifact, reused });
   await observeGateForRules({ ...args, gate: args.gate, passed: artifact.passed });
   await creditPendingLessons({
     root: args.root,
@@ -276,7 +269,97 @@ export async function runLockedGate(args: {
     sessionKey: args.sessionKey,
     passed: artifact.passed,
   });
-  return { kind: "ran", artifact, reused: cached !== null };
+  return { kind: "ran", artifact, reused };
+}
+
+type LockedGateArgs = {
+  root: string;
+  shaRoot: string;
+  provider: string;
+  session: string;
+  gate: "lint" | "test" | "docs";
+  command: string[];
+  argvFiles: string[];
+  recordFiles: string[];
+  sessionKey: string;
+  policy: Policy;
+  pendingCredit: PendingLessonCredit | undefined;
+  deadline?: number;
+};
+
+type GateInputs = ReturnType<typeof coreFacade.gate.computeInputsHash>;
+
+function recordedVerdictFor(args: LockedGateArgs, tree: string | null) {
+  if (tree === null) {
+    return null;
+  }
+  return coreFacade.gate.findShipVerdict(args.root, args.gate, args.command, tree, [
+    args.sessionKey,
+    coreFacade.gate.VERIFY_SOURCE,
+  ]);
+}
+
+function writeArtifact(
+  args: LockedGateArgs,
+  command: string[],
+  inputs: GateInputs,
+  result: { exitCode: number; durationMs: number; output: string },
+): LastGateArtifact {
+  return coreFacade.gate.writeLastGate({
+    root: args.root,
+    sessionKey: args.sessionKey,
+    gate: args.gate,
+    exitCode: result.exitCode,
+    command,
+    files: args.recordFiles,
+    durationMs: result.durationMs,
+    output: result.output,
+    ...(inputs.complete ? { inputsHash: inputs.hash } : {}),
+  });
+}
+
+function overBudget(args: LockedGateArgs): GateRun | null {
+  if (args.deadline === undefined) {
+    return null;
+  }
+  const last = coreFacade.gate.lastShipVerdictFor(args.root, args.gate, args.command);
+  const needed = last?.timedOut === true ? last.durationMs * TIMED_OUT_HEADROOM : last?.durationMs;
+  const budgetMs = args.deadline - Date.now();
+  if (budgetMs > 0 && (needed === undefined || needed < budgetMs)) {
+    return null;
+  }
+  return { kind: "slow", estimateMs: last?.durationMs ?? 0, budgetMs: Math.max(0, budgetMs) };
+}
+
+async function runAndRecord(
+  args: LockedGateArgs,
+  command: string[],
+  inputs: GateInputs,
+  tree: string | null,
+): Promise<LastGateArtifact | { timedOutAfterMs: number }> {
+  const timeoutMs = args.deadline !== undefined ? Math.max(1, args.deadline - Date.now()) : undefined;
+  const result = await runCommand(
+    args.shaRoot,
+    args.command,
+    args.argvFiles,
+    timeoutMs !== undefined ? { timeoutMs } : {},
+  );
+  if (tree !== null && (await workingTreeId(args.shaRoot)) === tree) {
+    await coreFacade.gate.recordShipVerdict(args.root, {
+      gate: args.gate,
+      command: args.command,
+      tree,
+      exitCode: result.exitCode,
+      durationMs: result.durationMs,
+      output: result.output,
+      source: args.sessionKey,
+      ...(result.timedOut ? { timedOut: true } : {}),
+    });
+  }
+  if (result.timedOut) {
+    return { timedOutAfterMs: result.durationMs };
+  }
+  return writeArtifact(args, command, inputs, result);
 }
 
 async function failGate(args: {
@@ -514,6 +597,8 @@ export const stopHandler: Handler = async (event: HarnessEvent, ctx: HandlerCont
    * says so once at the end instead of three times ([/decisions/ad-073.md](/decisions/ad-073.md)).
    */
   const deferred: string[] = [];
+  const slow: Array<{ gate: string; estimateMs: number }> = [];
+  const gateDeadline = ctx.now.getTime() + stopGateBudgetMs();
   const rawChangedFiles = await listChangedRepoFiles(shaRoot, turnBase);
   const otherSessionFiles = await coreFacade.presence.filesClaimedByOtherLiveSessions(
     root,
@@ -620,9 +705,12 @@ export const stopHandler: Handler = async (event: HarnessEvent, ctx: HandlerCont
         ? codeTargets
         : [],
       recordFiles: codeTargets,
+      deadline: gateDeadline,
     });
     if (run.kind === "deferred") {
       deferred.push(run.holder);
+    } else if (run.kind === "slow") {
+      slow.push({ gate: "lint", estimateMs: run.estimateMs });
     } else if (!run.artifact.passed) {
       return failGate({
         root,
@@ -658,9 +746,12 @@ export const stopHandler: Handler = async (event: HarnessEvent, ctx: HandlerCont
           ? testTargets
           : [],
         recordFiles,
+        deadline: gateDeadline,
       });
       if (run.kind === "deferred") {
         deferred.push(run.holder);
+      } else if (run.kind === "slow") {
+        slow.push({ gate: "test", estimateMs: run.estimateMs });
       } else if (!run.artifact.passed) {
         return failGate({
           root,
@@ -817,9 +908,12 @@ export const stopHandler: Handler = async (event: HarnessEvent, ctx: HandlerCont
       command: policy.docs.command,
       argvFiles: [],
       recordFiles: changedFiles,
+      deadline: gateDeadline,
     });
     if (run.kind === "deferred") {
       deferred.push(run.holder);
+    } else if (run.kind === "slow") {
+      slow.push({ gate: "docs", estimateMs: run.estimateMs });
     } else if (!run.artifact.passed) {
       if (policy.docs.severity === "deny") {
         return failGate({
@@ -992,6 +1086,24 @@ export const stopHandler: Handler = async (event: HarnessEvent, ctx: HandlerCont
    * `{"decision":"block"}`, so telling the turn would mean blocking it — the defect being fixed. `gate.outcome` is
    * a `why` kind, so `tlc harness why` answers it after the fact.
    */
+  if (slow.length > 0) {
+    const names = slow.map(({ gate }) => gate).join(" + ");
+    const longest = Math.max(...slow.map(({ estimateMs }) => estimateMs));
+    await coreFacade.handoff.patchHandoff(root, provider, sessionKey, {
+      slice: {
+        last_gate_result: "skipped",
+        next_action: "Run `tlc harness verify` and let it finish before ending the turn.",
+      },
+    });
+    return {
+      kind: "continue",
+      text: [
+        `BLOCKED: the ${names} gate needs longer than a stop hook may run, so this turn's changes are not verified yet.`,
+        `TRIED: ${longest > 0 ? `the last run took ${Math.round(longest / 1000)}s` : "it did not finish"}; the stop hook gives its gates ${Math.round(stopGateBudgetMs() / 1000)}s.`,
+        "NEED: run `tlc harness verify` in the shell and let it finish — give it a timeout long enough for the whole suite, or run it in the background and wait — then end the turn. Its verdict is reused here and at push.",
+      ].join("\n"),
+    };
+  }
   const holders = [...new Set(deferred)];
   await coreFacade.handoff.patchHandoff(root, provider, sessionKey, {
     slice: {

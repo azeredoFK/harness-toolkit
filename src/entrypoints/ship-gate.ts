@@ -66,6 +66,24 @@ function formatDuration(ms: number): string {
   return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
+function requiredShipGates(
+  policy: HandlerContext["policy"],
+  scope: { codeTargets: string[]; testTargets: string[] },
+): Array<{ gate: string; command: string[] }> {
+  const required: Array<{ gate: string; command: string[] }> = [];
+  const changedCode = scope.codeTargets.length > 0;
+  if (policy.grind.enabled && policy.grind.lintCommand && changedCode) {
+    required.push({ gate: "lint", command: policy.grind.lintCommand });
+  }
+  if (policy.grind.enabled && policy.grind.testCommand && (changedCode || scope.testTargets.length > 0)) {
+    required.push({ gate: "test", command: policy.grind.testCommand });
+  }
+  if (policy.docs.command && policy.docs.command.length > 0 && policy.docs.severity === "deny") {
+    required.push({ gate: "docs", command: policy.docs.command });
+  }
+  return required;
+}
+
 function verdictRefusal(
   root: string,
   tree: string,
@@ -137,20 +155,7 @@ export async function shipGateVerdict(event: HarnessEvent, ctx: HandlerContext):
     };
   }
 
-  const required: Array<{ gate: string; command: string[] }> = [];
-  if (policy.grind.enabled && policy.grind.lintCommand && scope.codeTargets.length > 0) {
-    required.push({ gate: "lint", command: policy.grind.lintCommand });
-  }
-  if (
-    policy.grind.enabled &&
-    policy.grind.testCommand &&
-    (scope.testTargets.length > 0 || scope.codeTargets.length > 0)
-  ) {
-    required.push({ gate: "test", command: policy.grind.testCommand });
-  }
-  if (policy.docs.command && policy.docs.command.length > 0 && policy.docs.severity === "deny") {
-    required.push({ gate: "docs", command: policy.docs.command });
-  }
+  const required = requiredShipGates(policy, scope);
   if (required.length > 0) {
     const tree = await workingTreeId(shaRoot);
     if (tree !== null) {

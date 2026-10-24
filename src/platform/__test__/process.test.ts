@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { hostname, tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
@@ -115,5 +115,41 @@ describe("isProcessAlive", () => {
 
   test("the default probe finds this very test process alive", () => {
     assert.equal(isProcessAlive(process.pid, hostname()), true);
+  });
+});
+
+describe("a timeout", () => {
+  test("ends the whole process tree, so a grandchild cannot hold the pipes open", {
+    skip: process.platform === "win32",
+  }, async () => {
+    const dir = mkdtempSync(join(tmpdir(), "tlc-timeout-"));
+    const pidFile = join(dir, "grandchild.pid");
+    try {
+      const started = Date.now();
+      const result = await runCommand(dir, ["sh", "-c", `sleep 30 & echo $! > ${pidFile}; wait`], [], {
+        timeoutMs: 300,
+      });
+      const elapsed = Date.now() - started;
+
+      assert.equal(result.timedOut, true);
+      assert.ok(elapsed < 3000, `resolved after ${elapsed}ms`);
+      const grandchild = Number(readFileSync(pidFile, "utf8").trim());
+      const deadline = Date.now() + 2000;
+      while (isProcessAlive(grandchild, hostname()) && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.equal(isProcessAlive(grandchild, hostname()), false);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a command that finishes in time is not marked as timed out", async () => {
+    const result = await runCommand(tmpdir(), [process.execPath, "-e", "process.exit(0)"], [], {
+      timeoutMs: 10_000,
+    });
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.timedOut, undefined);
   });
 });

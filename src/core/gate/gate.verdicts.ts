@@ -7,6 +7,7 @@ import { trimOutputTail } from "./gate.artifact.ts";
 
 const SHIP_VERDICT_SCHEMA = "harness.ship-verdicts.v1";
 export const SHIP_VERDICT_LIMIT = 50;
+export const VERIFY_SOURCE = "verify";
 
 export type ShipVerdict = {
   gate: string;
@@ -17,6 +18,8 @@ export type ShipVerdict = {
   durationMs: number;
   outputTail: string;
   at: string;
+  timedOut?: boolean;
+  source?: string;
 };
 
 type ShipVerdictFile = { schema: string; verdicts: ShipVerdict[] };
@@ -47,9 +50,15 @@ export function findShipVerdict(
   gate: string,
   command: string[],
   tree: string,
+  sources?: readonly string[],
 ): ShipVerdict | null {
   const matches = readShipVerdicts(root).filter(
-    (verdict) => verdict.gate === gate && verdict.tree === tree && sameCommand(verdict.command, command),
+    (verdict) =>
+      verdict.timedOut !== true &&
+      (sources === undefined || (verdict.source !== undefined && sources.includes(verdict.source))) &&
+      verdict.gate === gate &&
+      verdict.tree === tree &&
+      sameCommand(verdict.command, command),
   );
   return matches.at(-1) ?? null;
 }
@@ -69,11 +78,13 @@ export async function recordShipVerdict(
     gate: input.gate,
     command: input.command,
     tree: input.tree,
-    passed: input.exitCode === 0,
+    passed: input.exitCode === 0 && input.timedOut !== true,
     exitCode: input.exitCode,
     durationMs: input.durationMs,
     outputTail: trimOutputTail(input.output),
     at: input.at ?? new Date().toISOString(),
+    ...(input.timedOut === true ? { timedOut: true } : {}),
+    ...(input.source !== undefined ? { source: input.source } : {}),
   };
   const path = shipVerdictsPath(root);
   await updateJsonAtomic<ShipVerdictFile>(
@@ -84,6 +95,7 @@ export async function recordShipVerdict(
           !(
             existing.gate === verdict.gate &&
             existing.tree === verdict.tree &&
+            existing.source === verdict.source &&
             sameCommand(existing.command, verdict.command)
           ),
       );

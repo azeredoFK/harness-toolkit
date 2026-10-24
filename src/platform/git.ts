@@ -103,9 +103,7 @@ export async function workingTreeId(dir: string): Promise<string | null> {
     } else if ((await git(["read-tree", "--empty"])).exitCode !== 0) {
       return null;
     }
-    if ((await git(["add", "-A"])).exitCode !== 0) {
-      return null;
-    }
+    await git(["add", "-A", "--ignore-errors"]);
     const tree = await git(["write-tree"]);
     const id = tree.stdout.trim();
     return tree.exitCode === 0 && id.length > 0 ? id : null;

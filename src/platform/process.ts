@@ -52,16 +52,18 @@ export async function runProcess(args: {
   input?: string;
   env?: NodeJS.ProcessEnv;
   timeoutMs?: number;
-}): Promise<{ exitCode: number; stdout: string; stderr: string }> {
+}): Promise<{ exitCode: number; stdout: string; stderr: string; timedOut?: boolean }> {
   const [file, ...argv] = args.command;
   if (file === undefined) {
     return { exitCode: 0, stdout: "", stderr: "" };
   }
+  const ownGroup = args.timeoutMs !== undefined && process.platform !== "win32";
   return await new Promise((resolve, reject) => {
     const child = spawn(file, argv, {
       cwd: args.cwd,
       stdio: ["pipe", "pipe", "pipe"] as const,
       env: args.env ?? process.env,
+      detached: ownGroup,
     });
     let stdout = "";
     let stderr = "";
@@ -71,6 +73,12 @@ export async function runProcess(args: {
         ? undefined
         : setTimeout(() => {
             timedOut = true;
+            try {
+              if (ownGroup && child.pid !== undefined) {
+                process.kill(-child.pid, "SIGKILL");
+                return;
+              }
+            } catch {}
             child.kill("SIGKILL");
           }, args.timeoutMs);
 
@@ -87,7 +95,12 @@ export async function runProcess(args: {
     child.on("close", (code) => {
       if (timer) clearTimeout(timer);
       if (timedOut) {
-        resolve({ exitCode: TIMEOUT_EXIT_CODE, stdout, stderr: `${stderr}\n(process timed out)` });
+        resolve({
+          exitCode: TIMEOUT_EXIT_CODE,
+          stdout,
+          stderr: `${stderr}\n(process timed out)`,
+          timedOut: true,
+        });
         return;
       }
       resolve({ exitCode: code ?? 1, stdout, stderr });
@@ -99,7 +112,7 @@ export async function runProcess(args: {
   });
 }
 
-export type CommandResult = { exitCode: number; output: string; durationMs: number };
+export type CommandResult = { exitCode: number; output: string; durationMs: number; timedOut?: boolean };
 
 export const NO_OUTPUT_CAPTURED = "(no output captured)";
 
@@ -114,7 +127,7 @@ export async function runCommand(
   projectDir: string,
   command: string[],
   extraArgs: string[] = [],
-  options: { env?: NodeJS.ProcessEnv } = {},
+  options: { env?: NodeJS.ProcessEnv; timeoutMs?: number } = {},
 ): Promise<CommandResult> {
   if (command.length === 0) {
     return { exitCode: 0, output: "", durationMs: 0 };
@@ -124,6 +137,7 @@ export async function runCommand(
     command: [...command, ...extraArgs],
     cwd: projectDir,
     env: options.env ? { ...process.env, ...options.env } : process.env,
+    ...(options.timeoutMs !== undefined ? { timeoutMs: options.timeoutMs } : {}),
   });
   const combined = (result.stdout + result.stderr).trim();
   const output = combined.length === 0 ? NO_OUTPUT_CAPTURED : combined;
@@ -131,5 +145,6 @@ export async function runCommand(
     exitCode: result.exitCode,
     output,
     durationMs: Date.now() - started,
+    ...(result.timedOut ? { timedOut: true } : {}),
   };
 }

@@ -108,4 +108,19 @@ describe("tlc harness verify", () => {
 
     assert.notEqual(outcomes[0]?.exitCode, 0);
   });
+
+  test("a tree git cannot identify records nothing and is not reported as a changed tree", async () => {
+    const plain = mkdtempSync(join(tmpdir(), "tlc-verify-plain-"));
+    cleanup.push(plain);
+    const { outcomes } = await verify({
+      root: plain,
+      cwd: plain,
+      gates: [{ gate: "test", command: exits(0) }],
+      ...quiet,
+    });
+
+    assert.equal(outcomes[0]?.unidentified, true);
+    assert.equal(outcomes[0]?.treeChanged, false);
+    assert.equal(outcomes[0]?.recorded, false);
+  });
 });

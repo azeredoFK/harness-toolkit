@@ -15,6 +15,7 @@ export type VerifyOutcome = {
   durationMs: number;
   recorded: boolean;
   treeChanged: boolean;
+  unidentified: boolean;
 };
 
 export function gatesToVerify(policy: ReturnType<typeof coreFacade.policy.loadPolicy>): VerifyGate[] {
@@ -74,8 +75,9 @@ export async function verify(args: {
     log(`▸ ${gate}: ${command.join(" ")}`);
     const result = await runStreaming(command, gitRoot, args.echo ?? true);
     tree = await workingTreeId(gitRoot);
-    const treeChanged = before === null || tree !== before;
-    if (!treeChanged && before !== null) {
+    const unidentified = before === null || tree === null;
+    const treeChanged = !unidentified && tree !== before;
+    if (!unidentified && !treeChanged && before !== null) {
       await coreFacade.gate.recordShipVerdict(args.root, {
         gate,
         command,
@@ -83,6 +85,7 @@ export async function verify(args: {
         exitCode: result.exitCode,
         durationMs: result.durationMs,
         output: result.output,
+        source: coreFacade.gate.VERIFY_SOURCE,
       });
     }
     outcomes.push({
@@ -90,8 +93,9 @@ export async function verify(args: {
       command,
       exitCode: result.exitCode,
       durationMs: result.durationMs,
-      recorded: !treeChanged,
+      recorded: !unidentified && !treeChanged,
       treeChanged,
+      unidentified,
     });
     log(
       `${result.exitCode === 0 ? "✔" : "✖"} ${gate} — exit ${result.exitCode} in ${Math.round(result.durationMs / 1000)}s`,
@@ -126,10 +130,15 @@ export async function main(argv: string[]): Promise<void> {
   });
   const failed = outcomes.find((outcome) => outcome.exitCode !== 0);
   const changed = outcomes.find((outcome) => outcome.treeChanged);
+  const unidentified = outcomes.find((outcome) => outcome.unidentified);
   if (json) {
     emitJson({ tree, outcomes });
   } else if (failed) {
     console.log(`verify: ${failed.gate} failed — fix it and run \`tlc harness verify\` again`);
+  } else if (unidentified) {
+    console.log(
+      "verify: git could not identify the working tree, so no verdict was recorded — run `git status` to see what it cannot read",
+    );
   } else if (changed) {
     console.log(
       `verify: ${changed.gate} changed files while it ran, so its result describes a tree that no longer exists — review the changes and run \`tlc harness verify\` again`,
@@ -137,7 +146,7 @@ export async function main(argv: string[]): Promise<void> {
   } else {
     console.log(`verify: all gates passed for tree ${tree?.slice(0, 12)} — commit, push and PR may proceed`);
   }
-  process.exit(failed || changed ? 1 : 0);
+  process.exit(failed || changed || unidentified ? 1 : 0);
 }
 
 if (import.meta.main) {
