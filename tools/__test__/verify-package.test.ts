@@ -14,6 +14,7 @@ import {
   probeEnv,
   probeSteps,
   registrySpec,
+  retryDelaySeconds,
   runSteps,
 } from "../dev/verify-package.mjs";
 import { REDIRECTED_ENV } from "../test-env.names.mjs";
@@ -363,4 +364,16 @@ test("importing the module runs nothing", () => {
   // why unindented: an indented declaration is inside a function, which is where spawning belongs. Only a
   // module-scope one executes on import, and that is the defect this rail exists for.
   assert.doesNotMatch(source.slice(0, guard), /^(?:const|let)\s+\w+\s*=\s*(?:run|spawnSync)\(/m);
+});
+
+test("the registry wait grows and is capped, so a slow CDN does not fail a good release", () => {
+  assert.deepEqual([1, 2, 3, 6, 7, 15].map(retryDelaySeconds), [10, 20, 30, 60, 60, 60]);
+  const total = Array.from({ length: 15 }, (_, index) => retryDelaySeconds(index + 1)).reduce(
+    (a, b) => a + b,
+    0,
+  );
+  assert.ok(
+    total >= 600,
+    `fifteen attempts wait ${total}s, enough for the propagation measured on real releases`,
+  );
 });

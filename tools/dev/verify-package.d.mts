@@ -30,3 +30,5 @@ export function envSpec(
 ): { spec: string; version: string } | null;
 export function registrySpec(argv: string[]): { spec: string; version: string } | null;
 export function attempts(argv: string[]): number;
+
+export function retryDelaySeconds(attempt: number): number;

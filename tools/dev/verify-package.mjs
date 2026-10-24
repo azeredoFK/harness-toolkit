@@ -324,6 +324,10 @@ export function attempts(argv) {
   return parsed;
 }
 
+export function retryDelaySeconds(attempt) {
+  return Math.min(10 * attempt, 60);
+}
+
 function sleepSeconds(seconds) {
   Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, seconds * 1000);
 }
@@ -346,7 +350,7 @@ if (import.meta.main) {
     // failed to answer is broken, and waiting will not change that.
     for (let attempt = 1; attempt <= retries && !probe.ok && probe.index === 0; attempt += 1) {
       console.log(`verify-package: ${published.spec} not installable yet — attempt ${attempt} of ${retries}`);
-      sleepSeconds(10);
+      sleepSeconds(retryDelaySeconds(attempt));
       probe = inPrefix(published.spec, published.version);
     }
     console.log(`verify-package: clean room = ${probe.room}`);
