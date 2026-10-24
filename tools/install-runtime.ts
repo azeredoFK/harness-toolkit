@@ -94,6 +94,20 @@ export function originRoot(env: NodeJS.ProcessEnv = process.env): string {
  * invariant: one comparison, in `platform/`, so every caller that has to ask "is this the same place" gets the same
  * answer ([/decisions/ad-101.md](/decisions/ad-101.md)).
  */
+function copyEntry(source: string, from: string, to: string): void {
+  for (let attempt = 1; ; attempt += 1) {
+    rmSync(to, { recursive: true, force: true });
+    try {
+      cpSync(from, to, { recursive: true, filter: (src) => isShipped(relative(source, src)) });
+      return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT" || attempt >= 3) {
+        throw error;
+      }
+    }
+  }
+}
+
 export function installRuntime(source: string, dest: string): InstallReport {
   if (sameLocation(source, dest)) {
     // why: the git route already has the code at the destination. Copying a directory onto itself is the one
@@ -109,12 +123,7 @@ export function installRuntime(source: string, dest: string): InstallReport {
       missing.push(entry);
       continue;
     }
-    const to = join(dest, entry);
-    rmSync(to, { recursive: true, force: true });
-    cpSync(from, to, {
-      recursive: true,
-      filter: (src) => isShipped(relative(source, src)),
-    });
+    copyEntry(source, from, join(dest, entry));
     entries.push(entry);
   }
   // why: a directory with no `.git` used to classify as `unmanaged`, which doctor reports as a failure and update
