@@ -7,6 +7,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, describe, test } from "node:test";
+import { gatesToVerify, verify } from "../../../tools/verify.ts";
 import { coreFacade } from "../../core/index.ts";
 import { projectConfigPath } from "../../platform/paths.ts";
 import { promptSubmitHandler } from "../prompt-submit.ts";
@@ -97,6 +98,11 @@ function cursorShip(root: string, command: string): string {
 }
 
 const stdinOf = (text: string) => ({ readStdin: () => Promise.resolve(text) });
+
+async function verified(root: string): Promise<void> {
+  const gates = gatesToVerify(coreFacade.policy.loadPolicy(root));
+  await verify({ root, cwd: root, gates, echo: false, log: () => {} });
+}
 
 // why: reproduces the exact production shape — `CLAUDE_PROJECT_DIR` (event.projectDir) stays at the main
 // checkout, while the payload's own `cwd` (event.cwd) tracks the worktree the agent actually works in
@@ -269,6 +275,7 @@ describe("ship-gate: worktree scoping, AD-129", () => {
   test("WTS-03 no worktree, no divergence: behavior is unchanged from before this fix", async () => {
     const root = dirtyRepo();
     writePolicy(root, { grind: { enabled: true, lintCommand: gate(1) } });
+    await verified(root);
 
     const claude = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PUSH)));
     const cursor = await runHandler(toolBeforeHandler, stdinOf(cursorShip(root, PUSH)));
@@ -364,6 +371,7 @@ describe("ship-gate: commit/push/pr-open run the same battery stop would, before
   test("AC lint failure denies push, identically on Claude and Cursor", async () => {
     const root = dirtyRepo();
     writePolicy(root, { grind: { enabled: true, lintCommand: gate(1) } });
+    await verified(root);
 
     const claude = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PUSH)));
     const cursor = await runHandler(toolBeforeHandler, stdinOf(cursorShip(root, PUSH)));
@@ -413,6 +421,7 @@ describe("ship-gate: commit/push/pr-open run the same battery stop would, before
       "process.stdout.write('x'.repeat(9000) + 'END'); process.exit(1);",
     ];
     writePolicy(root, { grind: { enabled: true, lintCommand: bigOutputLint } });
+    await verified(root);
 
     const outcome = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PUSH)));
 
@@ -427,6 +436,7 @@ describe("ship-gate: commit/push/pr-open run the same battery stop would, before
   test("AC lint passing but test failing denies push, identically on both hosts", async () => {
     const root = dirtyRepo();
     writePolicy(root, { grind: { enabled: true, lintCommand: gate(0), testCommand: gate(1) } });
+    await verified(root);
 
     const claude = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PUSH)));
     const cursor = await runHandler(toolBeforeHandler, stdinOf(cursorShip(root, PUSH)));
@@ -440,6 +450,7 @@ describe("ship-gate: commit/push/pr-open run the same battery stop would, before
   test("AC docs severity deny blocks push; docs severity warn does not", async () => {
     const failing = dirtyRepo();
     writePolicy(failing, { docs: { command: gate(1), severity: "deny" } });
+    await verified(failing);
     const denied = await runHandler(toolBeforeHandler, stdinOf(claudeShip(failing, PUSH)));
     assert.equal(denied.decision.kind, "deny");
     assert.equal(denied.decision.kind === "deny" ? denied.decision.rule : "", "ship-gate-docs");
@@ -501,6 +512,7 @@ describe("ship-gate: commit/push/pr-open run the same battery stop would, before
   test("AC a clean turn allows push on both hosts", async () => {
     const root = dirtyRepo();
     writePolicy(root, { grind: { enabled: true, lintCommand: gate(0), testCommand: gate(0) } });
+    await verified(root);
 
     const claude = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PUSH)));
     const cursor = await runHandler(toolBeforeHandler, stdinOf(cursorShip(root, PUSH)));
@@ -513,6 +525,7 @@ describe("ship-gate: commit/push/pr-open run the same battery stop would, before
   test("APIG-14 a pr-merge also pays the full battery, identically on both hosts", async () => {
     const root = dirtyRepo();
     writePolicy(root, { grind: { enabled: true, lintCommand: gate(1) } });
+    await verified(root);
 
     const claude = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PR_MERGE)));
     const cursor = await runHandler(toolBeforeHandler, stdinOf(cursorShip(root, PR_MERGE)));
@@ -591,6 +604,7 @@ describe("ship-gate: denials name what they checked, AD-131", () => {
   test("DIAG-03 a lint-gate failure names the checked root and the why pointer, without a sha or a reproduction line", async () => {
     const root = dirtyRepo();
     writePolicy(root, { grind: { enabled: true, lintCommand: gate(1) } });
+    await verified(root);
 
     const outcome = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PUSH)));
 
@@ -639,6 +653,7 @@ describe("ship-gate: gh api push is scoped to the local checkout's own remote, A
     const root = dirtyRepo();
     git(root, "remote", "add", "origin", "https://github.com/acme/widgets.git");
     writePolicy(root, { grind: { enabled: true, lintCommand: gate(1) } });
+    await verified(root);
 
     const outcome = await runHandler(
       toolBeforeHandler,
@@ -647,5 +662,78 @@ describe("ship-gate: gh api push is scoped to the local checkout's own remote, A
 
     assert.equal(outcome.decision.kind, "deny", JSON.stringify(outcome.decision));
     assert.equal(outcome.decision.kind === "deny" ? outcome.decision.rule : "", "ship-gate-lint");
+  });
+});
+
+describe("ship-gate: the hook reads a recorded verdict and never runs the suite itself", () => {
+  test("an unverified tree is refused with the command that verifies it, on both hosts", async () => {
+    const root = dirtyRepo();
+    writePolicy(root, { grind: { enabled: true, lintCommand: gate(0), testCommand: gate(0) } });
+
+    const claude = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PUSH)));
+    const cursor = await runHandler(toolBeforeHandler, stdinOf(cursorShip(root, PUSH)));
+
+    for (const outcome of [claude, cursor]) {
+      assert.equal(outcome.decision.kind, "deny", JSON.stringify(outcome.decision));
+      assert.equal(outcome.decision.kind === "deny" ? outcome.decision.rule : "", "ship-gate-unverified");
+      assert.match(outcome.decision.kind === "deny" ? outcome.decision.reason : "", /tlc harness verify/);
+    }
+  });
+
+  test("a suite slower than any hook timeout is never started by the hook", async () => {
+    const root = dirtyRepo();
+    const slow = [process.execPath, "-e", "setTimeout(() => process.exit(0), 30000);"];
+    writePolicy(root, { grind: { enabled: true, testCommand: slow } });
+
+    const started = Date.now();
+    const outcome = await runHandler(toolBeforeHandler, stdinOf(cursorShip(root, PUSH)));
+
+    assert.ok(Date.now() - started < 5000, `the hook took ${Date.now() - started}ms`);
+    assert.equal(outcome.decision.kind === "deny" ? outcome.decision.rule : "", "ship-gate-unverified");
+  });
+
+  test("a verdict stops counting once the tree changes", async () => {
+    const root = dirtyRepo();
+    writePolicy(root, { grind: { enabled: true, testCommand: gate(0) } });
+    await verified(root);
+    writeFileSync(join(root, "src", "app.ts"), "export const a = 3;\n");
+
+    const outcome = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PUSH)));
+
+    assert.equal(outcome.decision.kind === "deny" ? outcome.decision.rule : "", "ship-gate-unverified");
+  });
+
+  test("a verdict recorded before a commit still covers the push of that commit", async () => {
+    const root = dirtyRepo();
+    writePolicy(root, { grind: { enabled: true, testCommand: gate(0) } });
+    await verified(root);
+    git(root, "commit", "-q", "-am", "ship it");
+
+    const outcome = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PUSH)));
+
+    assert.notEqual(outcome.decision.kind, "deny", JSON.stringify(outcome.decision));
+  });
+
+  test("a verify run in a linked worktree is read by a session whose project is the main checkout", async () => {
+    const main = cleanRepo();
+    writePolicy(main, { grind: { enabled: true, testCommand: gate(0) } });
+    const worktree = addWorktree(main, "feature-verdict");
+    writePolicy(worktree, { grind: { enabled: true, testCommand: gate(0) } });
+    writeFileSync(join(worktree, "src", "app.ts"), "export const a = 9;\n");
+    await verify({
+      root: worktree,
+      cwd: worktree,
+      gates: [{ gate: "test", command: gate(0) }],
+      echo: false,
+      log: () => {},
+    });
+
+    const outcome = await runHandler(toolBeforeHandler, stdinOf(cursorShipInWorktree(main, worktree, PUSH)));
+
+    assert.notEqual(
+      outcome.decision.kind === "deny" ? outcome.decision.rule : "",
+      "ship-gate-unverified",
+      JSON.stringify(outcome.decision),
+    );
   });
 });

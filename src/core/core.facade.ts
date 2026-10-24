@@ -56,6 +56,7 @@ import { filesFromOutput } from "./gate/gate.findings.ts";
 import { cachedVerdict, computeInputsHash, isCacheHit } from "./gate/gate.inputs.ts";
 import { describeHolder, GATE_LOCK_WAIT_MS, GateLockTimeoutError, withGateLock } from "./gate/gate.lock.ts";
 import { gapsFromArtifact } from "./gate/gate.service.ts";
+import { findShipVerdict, lastShipVerdictFor, recordShipVerdict } from "./gate/gate.verdicts.ts";
 import {
   clearStuckSignals,
   handoffInjectable,
@@ -317,6 +318,9 @@ export const coreFacade = {
     isRecipeRunner,
     isCommandResolutionFailure,
     filesFromOutput,
+    findShipVerdict,
+    lastShipVerdictFor,
+    recordShipVerdict,
   },
   stagnation: {
     computeFingerprint,

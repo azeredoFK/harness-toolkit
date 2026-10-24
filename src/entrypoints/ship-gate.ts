@@ -5,16 +5,15 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import type { Decision, HarnessEvent } from "../contracts/index.ts";
 import { coreFacade } from "../core/index.ts";
-import { gitRootOf, listAddedLines, listTrackedFiles, localRepoRemote } from "../platform/git.ts";
-import type { HandlerContext } from "./run.ts";
-import { runLockedGate } from "./stop.ts";
 import {
-  computeTurnScope,
-  currentGitSha,
-  pendingCommentViolations,
-  sessionIdFromKey,
-  shaScopeRoot,
-} from "./support.ts";
+  gitRootOf,
+  listAddedLines,
+  listTrackedFiles,
+  localRepoRemote,
+  workingTreeId,
+} from "../platform/git.ts";
+import type { HandlerContext } from "./run.ts";
+import { computeTurnScope, currentGitSha, pendingCommentViolations, shaScopeRoot } from "./support.ts";
 
 // why: pr-merge is the moment code actually lands on the shared branch. Usually no local diff exists at merge
 // time, so the battery abstains — the merged commits already paid it at push/pr-open time
@@ -62,6 +61,54 @@ function gateFailureMessage(
   ].join("\n");
 }
 
+function formatDuration(ms: number): string {
+  const seconds = Math.round(ms / 1000);
+  return seconds < 60 ? `${seconds}s` : `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
+}
+
+function verdictRefusal(
+  root: string,
+  tree: string,
+  required: Array<{ gate: string; command: string[] }>,
+  diag: ReturnType<typeof coreFacade.diagnostics.rootDiagnostic>,
+): Decision | null {
+  const missing: Array<{ gate: string; command: string[] }> = [];
+  for (const { gate, command } of required) {
+    const verdict = coreFacade.gate.findShipVerdict(root, gate, command, tree);
+    if (verdict === null) {
+      missing.push({ gate, command });
+      continue;
+    }
+    if (!verdict.passed) {
+      return {
+        kind: "deny",
+        reason: gateFailureMessage(gate, verdict.command, verdict.outputTail, diag),
+        rule: `ship-gate-${gate}`,
+        diagnostic: diag.summary,
+      };
+    }
+  }
+  if (missing.length === 0) {
+    return null;
+  }
+  const last = missing
+    .map(({ gate, command }) => coreFacade.gate.lastShipVerdictFor(root, gate, command))
+    .reduce((total, verdict) => total + (verdict?.durationMs ?? 0), 0);
+  const estimate = last > 0 ? ` The last run took ${formatDuration(last)}.` : "";
+  return {
+    kind: "deny",
+    reason: [
+      `BLOCKED: no passing ${missing.map(({ gate }) => gate).join(" + ")} run is recorded for this tree, and a hook cannot wait for one.`,
+      `TRIED: looked up the verdicts recorded for tree ${tree.slice(0, 12)}.`,
+      `NEED: run \`tlc harness verify\` in the shell, let it finish, then retry the commit/push/PR.${estimate} Give the command a timeout long enough for the whole suite, or run it in the background and wait for it.`,
+      "",
+      diag.footer,
+    ].join("\n"),
+    rule: "ship-gate-unverified",
+    diagnostic: diag.summary,
+  };
+}
+
 /**
  * why after comments and before the stop-rules check: cheapest first. A comment violation costs a
  * regex scan; a gate command is a real process; the stop-rules check is a directory read plus, only
@@ -76,7 +123,6 @@ export async function shipGateVerdict(event: HarnessEvent, ctx: HandlerContext):
   const root = event.projectDir;
   const provider = event.provider;
   const sessionKey = event.sessionKey;
-  const session = sessionIdFromKey(event);
   const scope = await computeTurnScope(root, shaRoot, provider, sessionKey, policy);
   const rootDiag = coreFacade.diagnostics.rootDiagnostic(shaRoot);
 
@@ -91,84 +137,27 @@ export async function shipGateVerdict(event: HarnessEvent, ctx: HandlerContext):
     };
   }
 
+  const required: Array<{ gate: string; command: string[] }> = [];
   if (policy.grind.enabled && policy.grind.lintCommand && scope.codeTargets.length > 0) {
-    const run = await runLockedGate({
-      root,
-      shaRoot,
-      provider,
-      session,
-      pendingCredit: scope.pendingCredit,
-      sessionKey,
-      policy,
-      gate: "lint",
-      command: policy.grind.lintCommand,
-      argvFiles: coreFacade.gate.shouldAppendFiles(policy.grind.lintCommand, policy.grind.appendFiles)
-        ? scope.codeTargets
-        : [],
-      recordFiles: scope.codeTargets,
-    });
-    if (run.kind === "ran" && !run.artifact.passed) {
-      return {
-        kind: "deny",
-        reason: gateFailureMessage("lint", run.artifact.command, run.artifact.outputTail, rootDiag),
-        rule: "ship-gate-lint",
-        diagnostic: rootDiag.summary,
-      };
-    }
+    required.push({ gate: "lint", command: policy.grind.lintCommand });
   }
-
   if (
     policy.grind.enabled &&
     policy.grind.testCommand &&
     (scope.testTargets.length > 0 || scope.codeTargets.length > 0)
   ) {
-    const recordFiles = scope.testTargets.length > 0 ? scope.testTargets : scope.codeTargets;
-    const run = await runLockedGate({
-      root,
-      shaRoot,
-      provider,
-      session,
-      pendingCredit: scope.pendingCredit,
-      sessionKey,
-      policy,
-      gate: "test",
-      command: policy.grind.testCommand,
-      argvFiles: coreFacade.gate.shouldAppendFiles(policy.grind.testCommand, policy.grind.appendFiles)
-        ? recordFiles
-        : [],
-      recordFiles,
-    });
-    if (run.kind === "ran" && !run.artifact.passed) {
-      return {
-        kind: "deny",
-        reason: gateFailureMessage("test", run.artifact.command, run.artifact.outputTail, rootDiag),
-        rule: "ship-gate-test",
-        diagnostic: rootDiag.summary,
-      };
-    }
+    required.push({ gate: "test", command: policy.grind.testCommand });
   }
-
   if (policy.docs.command && policy.docs.command.length > 0 && policy.docs.severity === "deny") {
-    const run = await runLockedGate({
-      root,
-      shaRoot,
-      provider,
-      session,
-      pendingCredit: scope.pendingCredit,
-      sessionKey,
-      policy,
-      gate: "docs",
-      command: policy.docs.command,
-      argvFiles: [],
-      recordFiles: scope.changedFiles,
-    });
-    if (run.kind === "ran" && !run.artifact.passed) {
-      return {
-        kind: "deny",
-        reason: gateFailureMessage("docs", run.artifact.command, run.artifact.outputTail, rootDiag),
-        rule: "ship-gate-docs",
-        diagnostic: rootDiag.summary,
-      };
+    required.push({ gate: "docs", command: policy.docs.command });
+  }
+  if (required.length > 0) {
+    const tree = await workingTreeId(shaRoot);
+    if (tree !== null) {
+      const refusal = verdictRefusal(root, tree, required, rootDiag);
+      if (refusal) {
+        return refusal;
+      }
     }
   }
 

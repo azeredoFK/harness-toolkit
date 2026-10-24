@@ -9,6 +9,7 @@ import {
   listAddedLines,
   listChangedRepoFiles,
   listTrackedFiles,
+  workingTreeId,
 } from "../platform/git.ts";
 import { flagsDir } from "../platform/paths.ts";
 import { runCommand } from "../platform/process.ts";
@@ -226,7 +227,18 @@ export async function runLockedGate(args: {
         args.provider,
         args.session,
         async () => {
+          const treeBefore = await workingTreeId(args.shaRoot);
           const result = await runCommand(args.shaRoot, args.command, args.argvFiles);
+          if (treeBefore !== null && (await workingTreeId(args.shaRoot)) === treeBefore) {
+            await coreFacade.gate.recordShipVerdict(args.root, {
+              gate: args.gate,
+              command: args.command,
+              tree: treeBefore,
+              exitCode: result.exitCode,
+              durationMs: result.durationMs,
+              output: result.output,
+            });
+          }
           return coreFacade.gate.writeLastGate({
             root: args.root,
             sessionKey: args.sessionKey,

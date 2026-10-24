@@ -8,6 +8,7 @@ export type { CoreFacade } from "./core.facade.ts";
 export { coreFacade } from "./core.facade.ts";
 export type { FloorInput, FloorRule } from "./floor/floor.service.ts";
 export type { FailureCategory, GateFinding, GateGap, LastGateArtifact, LockBody } from "./gate/gate.types.ts";
+export type { ShipVerdict } from "./gate/gate.verdicts.ts";
 export type {
   ForeignSlice,
   GateResult,

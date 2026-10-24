@@ -130,6 +130,26 @@ A gate whose command never ran — exit 127, or a runner that could not resolve 
 `config`, not `verification`. The distinction matters: the verification follow-up tells the agent to fix the
 findings without deleting tests, which on a malformed command sends it to edit healthy code.
 
+## Lint and tests before push
+
+`push`, `gh pr create` and `gh pr merge` are refused unless the configured lint, test and (with `docs.severity:
+deny`) docs commands have passed **on the exact tree being shipped**. The hook never runs those commands itself: a
+real suite takes minutes, and both hosts kill a pre-tool hook long before that — Cursor refuses the tool when its hook
+is killed, so an inline suite meant every push was refused, green or not.
+
+Instead the hook looks up a recorded verdict, keyed by the gate, its command and the git id of the working tree. It
+answers in milliseconds:
+
+- a passing verdict for this tree lets the push through;
+- a failing one refuses it with the recorded output;
+- no verdict refuses it and tells the agent to run `tlc harness verify`.
+
+`tlc harness verify` runs the commands in the agent's own shell, where no hook timeout applies, and records the
+result. A `stop` gate run records one too, so a turn whose gates already passed usually pushes without the extra
+step. The tree id covers uncommitted and untracked files, so a verdict recorded before a commit still covers the
+push of that commit, and any edit after it does not. Linked worktrees share one record with their main checkout. A
+gate that rewrites files while it runs is not recorded, because its verdict describes a tree that no longer exists.
+
 ## pause / resume
 
 `tlc harness pause` is the circuit breaker: every hook steps aside and answers at once, reading no policy and

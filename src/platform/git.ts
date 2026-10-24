@@ -1,4 +1,14 @@
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  copyFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readFileSync,
+  rmSync,
+  statSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -55,6 +65,54 @@ export async function gitCommonDirOf(dir: string): Promise<string | null> {
     return await realpath(resolve(dir, raw));
   } catch {
     return null;
+  }
+}
+
+export async function workingTreeId(dir: string): Promise<string | null> {
+  let indexPath: string;
+  let objectsPath: string;
+  try {
+    const located = await runProcess({
+      command: ["git", "rev-parse", "--path-format=absolute", "--git-path", "index", "--git-path", "objects"],
+      cwd: dir,
+    });
+    const [index, objects] = located.stdout.trim().split("\n");
+    if (located.exitCode !== 0 || !index || !objects) {
+      return null;
+    }
+    indexPath = index;
+    objectsPath = objects;
+  } catch {
+    return null;
+  }
+  const scratch = mkdtempSync(join(tmpdir(), "tlc-tree-"));
+  const env = {
+    ...process.env,
+    GIT_INDEX_FILE: join(scratch, "index"),
+    GIT_OBJECT_DIRECTORY: join(scratch, "objects"),
+    GIT_ALTERNATE_OBJECT_DIRECTORIES: objectsPath,
+  };
+  const git = (args: string[]) =>
+    runProcess({ command: ["git", "-c", "core.fsmonitor=false", ...args], cwd: dir, env });
+  try {
+    mkdirSync(env.GIT_OBJECT_DIRECTORY);
+    if (existsSync(indexPath)) {
+      copyFileSync(indexPath, env.GIT_INDEX_FILE);
+      const original = statSync(indexPath);
+      utimesSync(env.GIT_INDEX_FILE, original.atime, original.mtime);
+    } else if ((await git(["read-tree", "--empty"])).exitCode !== 0) {
+      return null;
+    }
+    if ((await git(["add", "-A"])).exitCode !== 0) {
+      return null;
+    }
+    const tree = await git(["write-tree"]);
+    const id = tree.stdout.trim();
+    return tree.exitCode === 0 && id.length > 0 ? id : null;
+  } catch {
+    return null;
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
   }
 }
 

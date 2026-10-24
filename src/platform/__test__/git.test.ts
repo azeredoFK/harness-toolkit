@@ -7,6 +7,8 @@ import {
   readFileSync,
   realpathSync,
   rmSync,
+  statSync,
+  utimesSync,
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
@@ -24,6 +26,7 @@ import {
   listTrackedFiles,
   localRepoRemote,
   parseOwnerRepo,
+  workingTreeId,
 } from "../git.ts";
 
 function git(cwd: string, args: string[]): void {
@@ -614,6 +617,103 @@ describe("linkedWorktreeMainRoot", () => {
       assert.equal(linkedWorktreeMainRoot(plain), null);
     } finally {
       rmSync(main, { recursive: true, force: true });
+      rmSync(plain, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("workingTreeId", () => {
+  function committedRepo(): string {
+    const dir = initRepo();
+    writeFileSync(join(dir, ".gitignore"), "build/\n");
+    writeFileSync(join(dir, "a.txt"), "aaa\n");
+    git(dir, ["add", "."]);
+    git(dir, ["commit", "-q", "-m", "init"]);
+    return dir;
+  }
+
+  function headTree(dir: string): string {
+    return execFileSync("git", ["rev-parse", "HEAD^{tree}"], { cwd: dir, encoding: "utf8" }).trim();
+  }
+
+  function objectCount(dir: string): string {
+    return execFileSync("git", ["count-objects", "-v"], { cwd: dir, encoding: "utf8" });
+  }
+
+  test("a clean checkout is identified by the tree of HEAD", async () => {
+    const dir = committedRepo();
+    try {
+      assert.equal(await workingTreeId(dir), headTree(dir));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("an edit changes the id, and committing that edit keeps it", async () => {
+    const dir = committedRepo();
+    try {
+      writeFileSync(join(dir, "a.txt"), "changed\n");
+      const dirty = await workingTreeId(dir);
+      assert.notEqual(dirty, headTree(dir));
+      git(dir, ["commit", "-q", "-am", "edit"]);
+      assert.equal(dirty, headTree(dir));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("a same-size edit inside the index's own timestamp is still seen", async () => {
+    const dir = committedRepo();
+    try {
+      git(dir, ["config", "core.checkStat", "minimal"]);
+      git(dir, ["config", "core.trustctime", "false"]);
+      const file = join(dir, "a.txt");
+      const index = join(dir, ".git", "index");
+      const stamp = Math.floor(statSync(index).mtimeMs / 1000) - 10;
+      utimesSync(file, stamp, stamp);
+      git(dir, ["update-index", "--really-refresh"]);
+      writeFileSync(file, "bbb\n");
+      utimesSync(file, stamp, stamp);
+      utimesSync(index, stamp, stamp);
+      assert.notEqual(await workingTreeId(dir), headTree(dir));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("untracked files count and ignored files do not", async () => {
+    const dir = committedRepo();
+    try {
+      mkdirSync(join(dir, "build"));
+      writeFileSync(join(dir, "build", "out.js"), "x\n");
+      assert.equal(await workingTreeId(dir), headTree(dir));
+      writeFileSync(join(dir, "new.txt"), "n\n");
+      assert.notEqual(await workingTreeId(dir), headTree(dir));
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("computing the id writes nothing into the repository", async () => {
+    const dir = committedRepo();
+    try {
+      writeFileSync(join(dir, "a.txt"), "never added\n");
+      writeFileSync(join(dir, "new.txt"), "never added either\n");
+      const before = objectCount(dir);
+      const index = readFileSync(join(dir, ".git", "index"));
+      await workingTreeId(dir);
+      assert.equal(objectCount(dir), before);
+      assert.deepEqual(readFileSync(join(dir, ".git", "index")), index);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("outside a repository there is no id", async () => {
+    const plain = mkdtempSync(join(tmpdir(), "no-git-"));
+    try {
+      assert.equal(await workingTreeId(plain), null);
+    } finally {
       rmSync(plain, { recursive: true, force: true });
     }
   });

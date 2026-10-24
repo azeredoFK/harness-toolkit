@@ -68,6 +68,14 @@ reports can be matched to the invocation that produced it:
 
 The file rotates to `hook-trace.jsonl.1` at 5 MB.
 
+## A push is refused: no passing run is recorded for this tree
+
+The push battery reads a verdict recorded for the exact working tree; it does not run the suite inside the hook.
+Run `tlc harness verify` in the shell and retry. Give that command a timeout long enough for the whole suite, or run
+it in the background and wait — Cursor's agent shell gives up on a command after about 30 seconds by default. Any
+edit after the run changes the tree and needs a new run. A gate that rewrites files (a formatter) is not recorded:
+review what it changed and run `verify` again.
+
 ## Node vs Bun
 
 - Preferred: **Bun** on PATH — every hook runs the TypeScript source directly, ~1 ms per invocation.

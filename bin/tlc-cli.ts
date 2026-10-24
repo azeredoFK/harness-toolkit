@@ -881,6 +881,7 @@ QUICK
   tlc harness uninstall            print what would be undone; --yes applies it, --purge includes state
   tlc harness build                compile dist/ for Node
   tlc harness test                 run the full local gate
+  tlc harness verify               run lint/tests on this tree; push and PR read the recorded verdict
   tlc harness help <topic>         documentation
 
 TOPICS
@@ -1203,6 +1204,8 @@ export function route(args: string[]): Action {
       return { kind: "version" };
     case "test":
       return { kind: "test" };
+    case "verify":
+      return { kind: "entry", entry: "verify", args: args.slice(1) };
     case "grind":
     case "g": {
       const arg = (args[1] ?? "on").toLowerCase();
@@ -1661,7 +1664,7 @@ async function main(argv: string[]): Promise<void> {
   if (group !== "harness") {
     console.error(`unknown: ${argv[0] ?? ""}`);
     console.error(
-      "usage: tlc harness <status|doctor|help|grind|pause|resume|reset|mode|obs|prices|lessons|init|update|test|build>",
+      "usage: tlc harness <status|doctor|help|grind|pause|resume|reset|mode|obs|prices|lessons|init|update|test|verify|build>",
     );
     process.exit(1);
   }
