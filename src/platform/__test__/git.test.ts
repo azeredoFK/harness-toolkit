@@ -20,6 +20,7 @@ import {
   filterCodeTargets,
   filterTestTargets,
   gitRootOf,
+  headTreeId,
   linkedWorktreeMainRoot,
   listAddedLines,
   listChangedRepoFiles,
@@ -721,6 +722,35 @@ describe("workingTreeId", () => {
       assert.equal(await workingTreeId(dir), headTree(dir));
     } finally {
       chmodSync(join(dir, "locked.txt"), 0o600);
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("the harness's own files never change the id", async () => {
+    const dir = committedRepo();
+    try {
+      const before = await workingTreeId(dir);
+      mkdirSync(join(dir, ".tlc", "harness"), { recursive: true });
+      writeFileSync(join(dir, ".tlc", "harness", "lessons.md"), "rewritten by the harness\n");
+      assert.equal(await workingTreeId(dir), before);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  test("with harness files committed, a clean checkout's id equals the id of HEAD", async () => {
+    const dir = committedRepo();
+    try {
+      mkdirSync(join(dir, ".tlc", "harness"), { recursive: true });
+      writeFileSync(join(dir, ".tlc", "harness", "config.json"), "{}\n");
+      git(dir, ["add", "."]);
+      git(dir, ["commit", "-q", "-m", "harness"]);
+      const head = await headTreeId(dir);
+      assert.ok(head);
+      assert.equal(await workingTreeId(dir), head);
+      writeFileSync(join(dir, "a.txt"), "edited\n");
+      assert.notEqual(await workingTreeId(dir), head);
+    } finally {
       rmSync(dir, { recursive: true, force: true });
     }
   });

@@ -2,6 +2,8 @@ import { existsSync, realpathSync } from "node:fs";
 import { homedir } from "node:os";
 import { delimiter, dirname, join, resolve } from "node:path";
 
+export const PROJECT_HARNESS_PATHSPEC = ".tlc/harness";
+
 function harnessDir(root: string): string {
   return join(root, ".tlc", "harness");
 }

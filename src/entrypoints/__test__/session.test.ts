@@ -13,7 +13,13 @@ import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { HarnessLesson } from "../../core/index.ts";
 import { coreFacade } from "../../core/index.ts";
-import { gateSessionsDir, policyBaselineDir, presenceDir, projectConfigPath } from "../../platform/paths.ts";
+import {
+  gateSessionsDir,
+  policyBaselineDir,
+  presenceDir,
+  projectConfigPath,
+  projectStateDir,
+} from "../../platform/paths.ts";
 import { CONTEXT_BUDGET_CHARS, runHandler } from "../run.ts";
 import { sessionEndHandler } from "../session-end.ts";
 import { sessionStartHandler } from "../session-start.ts";
@@ -661,4 +667,22 @@ test("carried gaps past the limit are counted rather than dropped in silence", (
 
 test("no carried gaps renders nothing at all", () => {
   assert.equal(coreFacade.turn.formatCarriedGaps([]), "");
+});
+
+test("a session start prunes session rollups older than the observability retention", async () => {
+  const root = tempRoot();
+  try {
+    const sessions = join(projectStateDir(root), "sessions");
+    mkdirSync(sessions, { recursive: true });
+    const old = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
+    writeFileSync(join(sessions, "old.json"), JSON.stringify({ updated_at: old }));
+    writeFileSync(join(sessions, "fresh.json"), JSON.stringify({ updated_at: new Date().toISOString() }));
+
+    await runHandler(sessionStartHandler, stdinOf(claudeStart(root)));
+
+    assert.equal(existsSync(join(sessions, "old.json")), false);
+    assert.equal(existsSync(join(sessions, "fresh.json")), true);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

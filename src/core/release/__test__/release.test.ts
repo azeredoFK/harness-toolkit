@@ -242,7 +242,7 @@ test("only the decisions doctor cannot see for you carry a note", () => {
   const withNotes = needsAction(all).map((decision) => decision.id);
   // AD-027: a blocked stop, invisible in advance. AD-058: a gate that starts firing where it was silent, on
   // turns that commit and in languages it never covered — no configuration changed, so nothing detects it.
-  assert.deepEqual(withNotes, ["AD-027", "AD-058"]);
+  assert.deepEqual(withNotes, ["AD-027", "AD-058", "AD-146"]);
   for (const decision of needsAction(all)) {
     assert.ok((decision.migration ?? "").length > 20, `${decision.id} has a note that says nothing`);
     assert.doesNotMatch(

@@ -166,6 +166,23 @@ function cleanRepo(): string {
   return dir;
 }
 
+function withRemote(root: string): void {
+  const bare = newDir("tlc-ship-gate-remote-");
+  git(bare, "init", "-q", "--bare");
+  git(root, "branch", "-M", "main");
+  git(root, "remote", "add", "origin", bare);
+  git(root, "push", "-q", "-u", "origin", "main");
+}
+
+function shippedBranchRepo(): string {
+  const root = cleanRepo();
+  withRemote(root);
+  git(root, "checkout", "-q", "-b", "feature");
+  writeFileSync(join(root, "src", "app.ts"), "export const a = 2;\n");
+  git(root, "commit", "-q", "-am", "feature work");
+  return root;
+}
+
 /**
  * AD-129 — the exact production incident: `event.projectDir` (main checkout) stays put per AD-114;
  * `event.cwd` (the worktree) is where the turn's actual files live. Before this fix, the comment/duplication
@@ -513,6 +530,7 @@ describe("ship-gate: commit/push/pr-open run the same battery stop would, before
     const root = dirtyRepo();
     writePolicy(root, { grind: { enabled: true, lintCommand: gate(0), testCommand: gate(0) } });
     await verified(root);
+    git(root, "commit", "-q", "-am", "verified work");
 
     const claude = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PUSH)));
     const cursor = await runHandler(toolBeforeHandler, stdinOf(cursorShip(root, PUSH)));
@@ -666,8 +684,8 @@ describe("ship-gate: gh api push is scoped to the local checkout's own remote, A
 });
 
 describe("ship-gate: the hook reads a recorded verdict and never runs the suite itself", () => {
-  test("an unverified tree is refused with the command that verifies it, on both hosts", async () => {
-    const root = dirtyRepo();
+  test("an unverified commit is refused with the command that verifies it, on both hosts", async () => {
+    const root = shippedBranchRepo();
     writePolicy(root, { grind: { enabled: true, lintCommand: gate(0), testCommand: gate(0) } });
 
     const claude = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PUSH)));
@@ -681,7 +699,7 @@ describe("ship-gate: the hook reads a recorded verdict and never runs the suite 
   });
 
   test("a suite slower than any hook timeout is never started by the hook", async () => {
-    const root = dirtyRepo();
+    const root = shippedBranchRepo();
     const slow = [process.execPath, "-e", "setTimeout(() => process.exit(0), 30000);"];
     writePolicy(root, { grind: { enabled: true, testCommand: slow } });
 
@@ -692,15 +710,85 @@ describe("ship-gate: the hook reads a recorded verdict and never runs the suite 
     assert.equal(outcome.decision.kind === "deny" ? outcome.decision.rule : "", "ship-gate-unverified");
   });
 
-  test("a verdict stops counting once the tree changes", async () => {
-    const root = dirtyRepo();
+  test("code committed in an earlier turn is still verified before it ships", async () => {
+    const root = shippedBranchRepo();
+    writePolicy(root, { grind: { enabled: true, testCommand: gate(0) } });
+
+    const before = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PUSH)));
+    await verified(root);
+    const after = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PUSH)));
+
+    assert.equal(before.decision.kind === "deny" ? before.decision.rule : "", "ship-gate-unverified");
+    assert.notEqual(after.decision.kind, "deny", JSON.stringify(after.decision));
+  });
+
+  test("a push with nothing new to send needs no verdict", async () => {
+    const root = shippedBranchRepo();
+    git(root, "push", "-q", "-u", "origin", "feature");
+    writePolicy(root, { grind: { enabled: true, testCommand: gate(0) } });
+
+    const outcome = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PUSH)));
+
+    assert.notEqual(outcome.decision.kind, "deny", JSON.stringify(outcome.decision));
+  });
+
+  test("opening a PR for an already pushed branch still needs its commit verified", async () => {
+    const root = shippedBranchRepo();
+    git(root, "push", "-q", "-u", "origin", "feature");
+    writePolicy(root, { grind: { enabled: true, testCommand: gate(0) } });
+
+    const outcome = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, "gh pr create --fill")));
+
+    assert.equal(outcome.decision.kind === "deny" ? outcome.decision.rule : "", "ship-gate-unverified");
+  });
+
+  test("a verdict stops counting once a new commit changes what ships", async () => {
+    const root = shippedBranchRepo();
     writePolicy(root, { grind: { enabled: true, testCommand: gate(0) } });
     await verified(root);
     writeFileSync(join(root, "src", "app.ts"), "export const a = 3;\n");
+    git(root, "commit", "-q", "-am", "more work");
 
     const outcome = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PUSH)));
 
     assert.equal(outcome.decision.kind === "deny" ? outcome.decision.rule : "", "ship-gate-unverified");
+  });
+
+  test("a verify run over uncommitted changes does not cover the commit that ships, and says which files", async () => {
+    const root = dirtyRepo();
+    writePolicy(root, { grind: { enabled: true, testCommand: gate(0) } });
+    await verified(root);
+
+    const outcome = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PUSH)));
+
+    assert.equal(outcome.decision.kind === "deny" ? outcome.decision.rule : "", "ship-gate-uncommitted");
+    assert.match(outcome.decision.kind === "deny" ? outcome.decision.reason : "", /src\/app\.ts/);
+  });
+
+  test("a verdict for the commit still counts while local changes that do not ship are around", async () => {
+    const root = shippedBranchRepo();
+    writePolicy(root, { grind: { enabled: true, testCommand: gate(0) } });
+    await verified(root);
+    writeFileSync(join(root, "notes.txt"), "scratch\n");
+
+    const outcome = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, PUSH)));
+
+    assert.notEqual(outcome.decision.kind, "deny", JSON.stringify(outcome.decision));
+  });
+
+  test("a command that commits and pushes ships the working tree, so that tree is what needs the verdict", async () => {
+    const root = shippedBranchRepo();
+    writePolicy(root, { grind: { enabled: true, testCommand: gate(0) } });
+    await verified(root);
+    writeFileSync(join(root, "src", "app.ts"), "export const a = 7;\n");
+    const commitAndPush = "git commit -am wip && git push -u origin feature";
+
+    const unverified = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, commitAndPush)));
+    await verified(root);
+    const verifiedNow = await runHandler(toolBeforeHandler, stdinOf(claudeShip(root, commitAndPush)));
+
+    assert.equal(unverified.decision.kind === "deny" ? unverified.decision.rule : "", "ship-gate-unverified");
+    assert.notEqual(verifiedNow.decision.kind, "deny", JSON.stringify(verifiedNow.decision));
   });
 
   test("a verdict recorded before a commit still covers the push of that commit", async () => {
@@ -716,10 +804,14 @@ describe("ship-gate: the hook reads a recorded verdict and never runs the suite 
 
   test("a verify run in a linked worktree is read by a session whose project is the main checkout", async () => {
     const main = cleanRepo();
+    withRemote(main);
     writePolicy(main, { grind: { enabled: true, testCommand: gate(0) } });
     const worktree = addWorktree(main, "feature-verdict");
     writePolicy(worktree, { grind: { enabled: true, testCommand: gate(0) } });
     writeFileSync(join(worktree, "src", "app.ts"), "export const a = 9;\n");
+    git(worktree, "commit", "-q", "-am", "worktree work");
+
+    const before = await runHandler(toolBeforeHandler, stdinOf(cursorShipInWorktree(main, worktree, PUSH)));
     await verify({
       root: worktree,
       cwd: worktree,
@@ -727,13 +819,9 @@ describe("ship-gate: the hook reads a recorded verdict and never runs the suite 
       echo: false,
       log: () => {},
     });
+    const after = await runHandler(toolBeforeHandler, stdinOf(cursorShipInWorktree(main, worktree, PUSH)));
 
-    const outcome = await runHandler(toolBeforeHandler, stdinOf(cursorShipInWorktree(main, worktree, PUSH)));
-
-    assert.notEqual(
-      outcome.decision.kind === "deny" ? outcome.decision.rule : "",
-      "ship-gate-unverified",
-      JSON.stringify(outcome.decision),
-    );
+    assert.equal(before.decision.kind === "deny" ? before.decision.rule : "", "ship-gate-unverified");
+    assert.notEqual(after.decision.kind, "deny", JSON.stringify(after.decision));
   });
 });

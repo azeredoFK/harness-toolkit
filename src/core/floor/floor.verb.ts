@@ -2,6 +2,8 @@ import type { ShellWord } from "./floor.tokenize.ts";
 
 export const WRAPPERS = new Set(["command", "doas", "env", "nice", "nohup", "sudo", "time", "xargs"]);
 
+const SHELL_KEYWORDS = new Set(["!", "{", "do", "elif", "else", "if", "then", "until", "while"]);
+
 export type SegmentHead = { verb: string; args: ShellWord[] };
 
 // why: `env FOO=bar cmd` and `sudo -n cmd` both delay the real verb; flags and assignments are skipped.
@@ -12,7 +14,12 @@ export function verbOf(words: ShellWord[]): SegmentHead | null {
     if (!word) {
       return null;
     }
-    if (WRAPPERS.has(word.text) || word.text.startsWith("-") || word.text.includes("=")) {
+    if (
+      WRAPPERS.has(word.text) ||
+      SHELL_KEYWORDS.has(word.text) ||
+      word.text.startsWith("-") ||
+      word.text.includes("=")
+    ) {
       index += 1;
       continue;
     }

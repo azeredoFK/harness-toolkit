@@ -16,6 +16,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, test } from "node:test";
+import type { Decision } from "../../contracts/index.ts";
 import { projectStateDir } from "../../platform/paths.ts";
 import { runHandler } from "../run.ts";
 import { stopHandler } from "../stop.ts";
@@ -245,8 +246,10 @@ describe("a gate proof comes from a gate that ran", () => {
 
   test("AC5 a gate that passed is recorded, and it is what clears the rule", async () => {
     withGateRule(0);
+    const ruleOf = (decision: Decision) => (decision.kind === "deny" ? decision.rule : "none");
 
-    assert.equal((await runHandler(toolBeforeHandler, stdinOf(openPr()))).decision.kind, "deny");
+    const before = await runHandler(toolBeforeHandler, stdinOf(openPr()));
+    assert.equal(ruleOf(before.decision), "rule:lint-before-pr");
 
     await runHandler(stopHandler, stdinOf(stopped()));
 
@@ -254,7 +257,8 @@ describe("a gate proof comes from a gate that ran", () => {
       observations().map((o) => [o.kind, o.value]),
       [["gate", "lint"]],
     );
-    assert.notEqual((await runHandler(toolBeforeHandler, stdinOf(openPr()))).decision.kind, "deny");
+    const after = await runHandler(toolBeforeHandler, stdinOf(openPr()));
+    assert.notEqual(ruleOf(after.decision), "rule:lint-before-pr");
   });
 
   /**

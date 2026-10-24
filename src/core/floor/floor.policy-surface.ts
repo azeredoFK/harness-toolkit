@@ -64,7 +64,66 @@ const PROVEN_READERS = new Set([
 
 // hazard: `git checkout -- <path>`, `git restore` and `git apply` overwrite the working tree, so `git` as a
 // whole cannot be a reader. Only the subcommands that provably do not write are allowed.
-const GIT_READERS = new Set(["show", "diff", "log", "status", "ls-files", "cat-file", "blame"]);
+const GIT_READERS = new Set([
+  "blame",
+  "cat-file",
+  "check-ignore",
+  "count-objects",
+  "describe",
+  "diff",
+  "for-each-ref",
+  "grep",
+  "log",
+  "ls-files",
+  "ls-tree",
+  "merge-base",
+  "rev-list",
+  "rev-parse",
+  "shortlog",
+  "show",
+  "show-ref",
+  "status",
+]);
+
+const GIT_VALUE_OPTIONS = new Set(["-C", "--git-dir", "--work-tree", "--namespace"]);
+
+const FIND_ACTIONS = new Set([
+  "-delete",
+  "-exec",
+  "-execdir",
+  "-fls",
+  "-fprint",
+  "-fprint0",
+  "-fprintf",
+  "-ok",
+  "-okdir",
+]);
+
+function writesThroughOption(word: ShellWord): boolean {
+  return (
+    word.text === "-O" || word.text.startsWith("--output") || word.text.startsWith("--open-files-in-pager")
+  );
+}
+
+function gitSubcommand(args: ShellWord[]): { subcommand: string; rest: ShellWord[] } | "unprovable" | null {
+  let index = 0;
+  while (index < args.length) {
+    const text = args[index]?.text ?? "";
+    if ((text.startsWith("-c") && text !== "-C") || text.startsWith("--config-env")) {
+      return "unprovable";
+    }
+    if (GIT_VALUE_OPTIONS.has(text)) {
+      index += 2;
+      continue;
+    }
+    if (text.startsWith("-")) {
+      index += 1;
+      continue;
+    }
+    return { subcommand: text.toLowerCase(), rest: args.slice(index + 1) };
+  }
+  return null;
+}
 
 // hazard: a heredoc is only a program when the verb it feeds executes what it reads. `git commit -F -` and
 // `cat <<EOF` take a heredoc that *documents* this path — commit messages and docs in this repository name
@@ -161,6 +220,7 @@ function referencesSurface(
   projectDir: string,
   word: ShellWord,
   extraSurfacePaths: readonly string[],
+  bases: readonly string[] = [projectDir],
 ): boolean {
   if (word.text === "") {
     return false;
@@ -175,7 +235,7 @@ function referencesSurface(
     }
     return extraSurfacePaths.some((path) => normalized.includes(normalizeSeparators(path)));
   }
-  return overlapsSurface(projectDir, resolveTarget(projectDir, word.text), extraSurfacePaths);
+  return bases.some((base) => overlapsSurface(projectDir, resolveTarget(base, word.text), extraSurfacePaths));
 }
 
 // why: a redirect target is not an argument of the head verb, so argument scanning alone would allow
@@ -222,9 +282,10 @@ function checkSegment(
   projectDir: string,
   segment: ShellSegment,
   extraSurfacePaths: readonly string[],
+  bases: readonly string[],
 ): PolicySurfaceVerdict {
   for (const target of redirectTargets(segment.words)) {
-    if (referencesSurface(projectDir, target, extraSurfacePaths)) {
+    if (referencesSurface(projectDir, target, extraSurfacePaths, bases)) {
       return deny(
         "a redirect in this command writes into the harness policy surface.",
         "redirect into the policy surface",
@@ -244,7 +305,9 @@ function checkSegment(
     }
   }
 
-  const references = segment.words.filter((word) => referencesSurface(projectDir, word, extraSurfacePaths));
+  const references = segment.words.filter((word) =>
+    referencesSurface(projectDir, word, extraSurfacePaths, bases),
+  );
   if (references.length === 0 && !namesSurface(projectDir, segment)) {
     return ALLOW;
   }
@@ -265,18 +328,36 @@ function checkSegment(
   }
   // why: a proven reader is cleared before any other question, because reading the policy is ordinary work
   // and the bootstrap asks for it by name. Nothing in this set can write a file on its own.
-  if (PROVEN_READERS.has(head.verb)) {
+  if (PROVEN_READERS.has(head.verb) || head.verb === "cd") {
     return ALLOW;
   }
-  if (head.verb === "git") {
-    const subcommand = firstOperand(head.args)?.text.toLowerCase() ?? "";
-    return GIT_READERS.has(subcommand)
-      ? ALLOW
-      : deny(
-          `\`git ${subcommand}\` can write the working tree, so it cannot be proven to only read the harness policy surface.`,
-          `git ${subcommand} on the policy surface`,
+  if (head.verb === "find") {
+    return head.args.some((word) => FIND_ACTIONS.has(word.text))
+      ? deny(
+          "`find` with an action can delete, run or write, so it cannot be proven to only read the harness policy surface.",
+          "find action on the policy surface",
           READ_REMEDY,
-        );
+        )
+      : ALLOW;
+  }
+  if (head.verb === "git") {
+    const parsed = gitSubcommand(head.args);
+    if (parsed === "unprovable") {
+      return deny(
+        "`git -c` can make any subcommand run a program, so it cannot be proven to only read the harness policy surface.",
+        "git -c on the policy surface",
+        READ_REMEDY,
+      );
+    }
+    const subcommand = parsed?.subcommand ?? "";
+    if (GIT_READERS.has(subcommand) && !(parsed?.rest ?? []).some(writesThroughOption)) {
+      return ALLOW;
+    }
+    return deny(
+      `\`git ${subcommand}\` can write the working tree, so it cannot be proven to only read the harness policy surface.`,
+      `git ${subcommand} on the policy surface`,
+      READ_REMEDY,
+    );
   }
   if (references.some((word) => word.unresolved)) {
     return deny(
@@ -315,6 +396,19 @@ function checkHeredocs(projectDir: string, heredocs: HeredocChunk[]): PolicySurf
   return ALLOW;
 }
 
+function basesAfter(segment: ShellSegment, bases: string[]): string[] {
+  const head = verbOf(segment.words);
+  if (head?.verb !== "cd") {
+    return bases;
+  }
+  const target = firstOperand(head.args);
+  if (target?.unresolved) {
+    return bases;
+  }
+  const destinations = bases.map((base) => resolveTarget(base, target?.text ?? "~"));
+  return [...new Set([...bases, ...destinations])];
+}
+
 // invariant: reads no policy. It answers from paths, head verbs and the command's own text, so the file it
 // protects can never influence the decision that protects it.
 export function checkPolicySurface(
@@ -323,11 +417,13 @@ export function checkPolicySurface(
   segments: ShellSegment[],
   extraSurfacePaths: readonly string[] = [],
 ): PolicySurfaceVerdict {
+  let bases: string[] = [projectDir];
   for (const segment of segments) {
-    const verdict = checkSegment(projectDir, segment, extraSurfacePaths);
+    const verdict = checkSegment(projectDir, segment, extraSurfacePaths, bases);
     if (verdict.kind === "deny") {
       return verdict;
     }
+    bases = basesAfter(segment, bases);
   }
   return checkHeredocs(projectDir, heredocChunks(command));
 }

@@ -6,10 +6,14 @@ import { join } from "node:path";
 import type { Decision, HarnessEvent } from "../contracts/index.ts";
 import { coreFacade } from "../core/index.ts";
 import {
+  filterCodeTargets,
+  filterTestTargets,
   gitRootOf,
   listAddedLines,
+  listChangedRepoFiles,
   listTrackedFiles,
   localRepoRemote,
+  shippedRange,
   workingTreeId,
 } from "../platform/git.ts";
 import type { HandlerContext } from "./run.ts";
@@ -25,22 +29,27 @@ const FULL_BATTERY_KINDS = ["push", "pr-open", "pr-merge"] as const;
  * gh-api shape only needs it to disambiguate an unrelated repository's push from this project's own
  * ([/decisions/ad-130.md](/decisions/ad-130.md)); a CLI-shape match or no match at all never pays for it.
  */
-async function isShipCommand(event: HarnessEvent, gitRoot: string): Promise<boolean> {
+type ShipKind = (typeof FULL_BATTERY_KINDS)[number];
+
+async function shipKind(event: HarnessEvent, gitRoot: string): Promise<ShipKind | null> {
   if (event.command === undefined) {
-    return false;
+    return null;
   }
   const context = { event: event.event, command: event.command };
-  if (!FULL_BATTERY_KINDS.some((kind) => coreFacade.rules.triggerMatches({ kind }, context))) {
-    return false;
+  const matched = FULL_BATTERY_KINDS.find((kind) => coreFacade.rules.triggerMatches({ kind }, context));
+  if (matched === undefined) {
+    return null;
   }
   // why: a CLI shape (`gh pr create`, `git push`) never reads `repoRemote` — only a `gh api` call can, so a
   // command that never mentions one already has its final answer.
   if (!coreFacade.rules.mentionsGhApi(event.command)) {
-    return true;
+    return matched;
   }
   const repoRemote = await localRepoRemote(gitRoot);
-  return FULL_BATTERY_KINDS.some((kind) =>
-    coreFacade.rules.triggerMatches({ kind }, { ...context, repoRemote }),
+  return (
+    FULL_BATTERY_KINDS.find((kind) =>
+      coreFacade.rules.triggerMatches({ kind }, { ...context, repoRemote }),
+    ) ?? null
   );
 }
 
@@ -84,20 +93,59 @@ function requiredShipGates(
   return required;
 }
 
+type ShipTrees = { head: string | null; work: string | null; dirtyPaths: string[] };
+
+function unverifiedRefusal(
+  root: string,
+  trees: ShipTrees,
+  missing: Array<{ gate: string; command: string[] }>,
+  diag: ReturnType<typeof coreFacade.diagnostics.rootDiagnostic>,
+): Decision {
+  const last = missing
+    .map(({ gate, command }) => coreFacade.gate.lastShipVerdictFor(root, gate, command))
+    .reduce((total, verdict) => total + (verdict?.durationMs ?? 0), 0);
+  const estimate = last > 0 ? ` The last run took ${formatDuration(last)}.` : "";
+  const gates = missing.map(({ gate }) => gate).join(" + ");
+  const dirty = trees.head !== null && trees.work !== null && trees.work !== trees.head;
+  const shown = trees.dirtyPaths.slice(0, 5).join(", ");
+  const more = trees.dirtyPaths.length > 5 ? ` and ${trees.dirtyPaths.length - 5} more` : "";
+  return {
+    kind: "deny",
+    reason: [
+      dirty
+        ? `BLOCKED: no passing ${gates} run is recorded for the commit being shipped. Uncommitted changes (${shown}${more}) mean a verify run here would test a tree that is not the one that ships.`
+        : `BLOCKED: no passing ${gates} run is recorded for the commit being shipped, and a hook cannot wait for one.`,
+      `TRIED: looked up the verdicts recorded for tree ${(trees.head ?? trees.work ?? "").slice(0, 12)}.`,
+      dirty
+        ? `NEED: commit, stash or gitignore those changes, run \`tlc harness verify\` in the shell and let it finish, then retry the commit/push/PR.${estimate} Give verify a timeout long enough for the whole suite, or run it in the background and wait for it.`
+        : `NEED: run \`tlc harness verify\` in the shell, let it finish, then retry the commit/push/PR.${estimate} Give the command a timeout long enough for the whole suite, or run it in the background and wait for it.`,
+      "",
+      diag.footer,
+    ].join("\n"),
+    rule: dirty ? "ship-gate-uncommitted" : "ship-gate-unverified",
+    diagnostic: diag.summary,
+  };
+}
+
 function verdictRefusal(
   root: string,
-  tree: string,
+  trees: ShipTrees,
   required: Array<{ gate: string; command: string[] }>,
   diag: ReturnType<typeof coreFacade.diagnostics.rootDiagnostic>,
 ): Decision | null {
+  const shipped = trees.head ?? trees.work;
+  if (shipped === null) {
+    return null;
+  }
   const missing: Array<{ gate: string; command: string[] }> = [];
   for (const { gate, command } of required) {
-    const verdict = coreFacade.gate.findShipVerdict(root, gate, command, tree);
-    if (verdict === null) {
-      missing.push({ gate, command });
-      continue;
-    }
-    if (!verdict.passed) {
+    const forShipped = coreFacade.gate.findShipVerdict(root, gate, command, shipped);
+    const forWork =
+      forShipped === null && trees.work !== null && trees.work !== shipped
+        ? coreFacade.gate.findShipVerdict(root, gate, command, trees.work)
+        : null;
+    const verdict = forShipped ?? forWork;
+    if (verdict !== null && !verdict.passed) {
       return {
         kind: "deny",
         reason: gateFailureMessage(gate, verdict.command, verdict.outputTail, diag),
@@ -105,36 +153,33 @@ function verdictRefusal(
         diagnostic: diag.summary,
       };
     }
+    if (forShipped === null) {
+      missing.push({ gate, command });
+    }
   }
-  if (missing.length === 0) {
-    return null;
-  }
-  const last = missing
-    .map(({ gate, command }) => coreFacade.gate.lastShipVerdictFor(root, gate, command))
-    .reduce((total, verdict) => total + (verdict?.durationMs ?? 0), 0);
-  const estimate = last > 0 ? ` The last run took ${formatDuration(last)}.` : "";
+  return missing.length === 0 ? null : unverifiedRefusal(root, trees, missing, diag);
+}
+
+async function shipScope(
+  kind: ShipKind,
+  shaRoot: string,
+  turn: { codeTargets: string[]; testTargets: string[] },
+  codePaths: string[],
+): Promise<{ codeTargets: string[]; testTargets: string[]; headTree: string | null }> {
+  const range = await shippedRange(shaRoot);
+  const nothingToPush = kind === "push" && range.aheadOfUpstream === 0;
+  const files = nothingToPush ? [] : range.files;
   return {
-    kind: "deny",
-    reason: [
-      `BLOCKED: no passing ${missing.map(({ gate }) => gate).join(" + ")} run is recorded for this tree, and a hook cannot wait for one.`,
-      `TRIED: looked up the verdicts recorded for tree ${tree.slice(0, 12)}.`,
-      `NEED: run \`tlc harness verify\` in the shell, let it finish, then retry the commit/push/PR.${estimate} Give the command a timeout long enough for the whole suite, or run it in the background and wait for it.`,
-      "",
-      diag.footer,
-    ].join("\n"),
-    rule: "ship-gate-unverified",
-    diagnostic: diag.summary,
+    codeTargets: [...new Set([...turn.codeTargets, ...filterCodeTargets(files, codePaths)])],
+    testTargets: [...new Set([...turn.testTargets, ...filterTestTargets(files)])],
+    headTree: range.headTree,
   };
 }
 
-/**
- * why after comments and before the stop-rules check: cheapest first. A comment violation costs a
- * regex scan; a gate command is a real process; the stop-rules check is a directory read plus, only
- * once something fired, one `git rev-parse`.
- */
 export async function shipGateVerdict(event: HarnessEvent, ctx: HandlerContext): Promise<Decision> {
   const shaRoot = await shaScopeRoot(event);
-  if (!(await isShipCommand(event, shaRoot))) {
+  const kind = await shipKind(event, shaRoot);
+  if (kind === null) {
     return { kind: "abstain" };
   }
   const { policy } = ctx;
@@ -155,14 +200,19 @@ export async function shipGateVerdict(event: HarnessEvent, ctx: HandlerContext):
     };
   }
 
-  const required = requiredShipGates(policy, scope);
+  const shipping = await shipScope(kind, shaRoot, scope, policy.codePaths);
+  const required = requiredShipGates(policy, shipping);
   if (required.length > 0) {
-    const tree = await workingTreeId(shaRoot);
-    if (tree !== null) {
-      const refusal = verdictRefusal(root, tree, required, rootDiag);
-      if (refusal) {
-        return refusal;
-      }
+    const work = await workingTreeId(shaRoot);
+    const commitsToo = coreFacade.rules.triggerMatches(
+      { kind: "commit" },
+      { event: event.event, command: event.command ?? "" },
+    );
+    const head = commitsToo ? work : shipping.headTree;
+    const dirtyPaths = work !== null && work !== head ? await listChangedRepoFiles(shaRoot) : [];
+    const refusal = verdictRefusal(root, { head, work, dirtyPaths }, required, rootDiag);
+    if (refusal) {
+      return refusal;
     }
   }
 

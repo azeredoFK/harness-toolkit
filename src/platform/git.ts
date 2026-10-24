@@ -12,6 +12,7 @@ import {
 import { realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
+import { PROJECT_HARNESS_PATHSPEC } from "./paths.ts";
 import { runProcess } from "./process.ts";
 import { normalizeSeparators } from "./sanitize.ts";
 
@@ -68,7 +69,7 @@ export async function gitCommonDirOf(dir: string): Promise<string | null> {
   }
 }
 
-export async function workingTreeId(dir: string): Promise<string | null> {
+async function scratchTreeId(dir: string, source: "work" | "head"): Promise<string | null> {
   let indexPath: string;
   let objectsPath: string;
   try {
@@ -96,14 +97,21 @@ export async function workingTreeId(dir: string): Promise<string | null> {
     runProcess({ command: ["git", "-c", "core.fsmonitor=false", ...args], cwd: dir, env });
   try {
     mkdirSync(env.GIT_OBJECT_DIRECTORY);
-    if (existsSync(indexPath)) {
+    if (source === "head") {
+      if ((await git(["read-tree", "HEAD"])).exitCode !== 0) {
+        return null;
+      }
+    } else if (existsSync(indexPath)) {
       copyFileSync(indexPath, env.GIT_INDEX_FILE);
       const original = statSync(indexPath);
       utimesSync(env.GIT_INDEX_FILE, original.atime, original.mtime);
-    } else if ((await git(["read-tree", "--empty"])).exitCode !== 0) {
+      await git(["add", "-A", "--ignore-errors"]);
+    } else if ((await git(["read-tree", "--empty"])).exitCode === 0) {
+      await git(["add", "-A", "--ignore-errors"]);
+    } else {
       return null;
     }
-    await git(["add", "-A", "--ignore-errors"]);
+    await git(["rm", "-r", "-q", "--cached", "--ignore-unmatch", "--", PROJECT_HARNESS_PATHSPEC]);
     const tree = await git(["write-tree"]);
     const id = tree.stdout.trim();
     return tree.exitCode === 0 && id.length > 0 ? id : null;
@@ -112,6 +120,14 @@ export async function workingTreeId(dir: string): Promise<string | null> {
   } finally {
     rmSync(scratch, { recursive: true, force: true });
   }
+}
+
+export function workingTreeId(dir: string): Promise<string | null> {
+  return scratchTreeId(dir, "work");
+}
+
+export function headTreeId(dir: string): Promise<string | null> {
+  return scratchTreeId(dir, "head");
 }
 
 export function linkedWorktreeMainRoot(root: string): string | null {
@@ -181,6 +197,49 @@ export async function listChangedRepoFiles(projectDir: string, base = "HEAD"): P
     }
   }
   return [...paths];
+}
+
+export type ShippedRange = {
+  base: string | null;
+  files: string[];
+  aheadOfUpstream: number | null;
+  headTree: string | null;
+};
+
+async function gitOut(root: string, args: string[]): Promise<string | null> {
+  try {
+    const result = await runProcess({ command: ["git", ...args], cwd: root });
+    const out = result.stdout.trim();
+    return result.exitCode === 0 && out.length > 0 ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+async function defaultRemoteBranch(root: string): Promise<string | null> {
+  const symbolic = await gitOut(root, ["symbolic-ref", "--quiet", "--short", "refs/remotes/origin/HEAD"]);
+  if (symbolic !== null) {
+    return symbolic;
+  }
+  for (const candidate of ["origin/main", "origin/master"]) {
+    if ((await gitOut(root, ["rev-parse", "--verify", "--quiet", `${candidate}^{commit}`])) !== null) {
+      return candidate;
+    }
+  }
+  return null;
+}
+
+export async function shippedRange(dir: string): Promise<ShippedRange> {
+  const root = await gitRootOf(dir);
+  if (root === null) {
+    return { base: null, files: [], aheadOfUpstream: null, headTree: null };
+  }
+  const headTree = await headTreeId(root);
+  const ahead = await gitOut(root, ["rev-list", "--count", "@{upstream}..HEAD"]);
+  const remoteDefault = await defaultRemoteBranch(root);
+  const base = remoteDefault !== null ? await gitOut(root, ["merge-base", "HEAD", remoteDefault]) : null;
+  const files = base !== null ? await gitPaths(root, ["diff", "--name-only", "-z", base, "HEAD"]) : [];
+  return { base, files, aheadOfUpstream: ahead === null ? null : Number(ahead), headTree };
 }
 
 /**

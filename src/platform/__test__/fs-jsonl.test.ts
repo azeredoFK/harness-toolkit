@@ -85,3 +85,67 @@ describe("readTail", () => {
     rmSync(dir, { recursive: true, force: true });
   });
 });
+
+describe("bounded jsonl", () => {
+  test("a file past its cap rotates to .1 and the new record starts a fresh file", () => {
+    const dir = tempDir();
+    const target = join(dir, "log.jsonl");
+    appendRecord(target, { seq: 1 }, 10);
+    appendRecord(target, { seq: 2 }, 10);
+
+    assert.equal(readFileSync(target, "utf8"), '{"seq":2}\n');
+    assert.equal(readFileSync(`${target}.1`, "utf8"), '{"seq":1}\n');
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("only one older generation is kept", () => {
+    const dir = tempDir();
+    const target = join(dir, "log.jsonl");
+    for (let seq = 1; seq <= 4; seq++) {
+      appendRecord(target, { seq }, 10);
+    }
+
+    assert.equal(readFileSync(`${target}.1`, "utf8"), '{"seq":3}\n');
+    assert.equal(existsSync(`${target}.2`), false);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a tail that the current file cannot fill continues into the rotated one", () => {
+    const dir = tempDir();
+    const target = join(dir, "log.jsonl");
+    for (let seq = 1; seq <= 3; seq++) {
+      appendRecord(target, { seq }, 10);
+    }
+
+    assert.deepEqual(readTail<{ seq: number }>(target, 2), [{ seq: 2 }, { seq: 3 }]);
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("the tail of a large file is read from its end and returns the newest records in order", () => {
+    const dir = tempDir();
+    const target = join(dir, "log.jsonl");
+    const lines = Array.from({ length: 20_000 }, (_, seq) => JSON.stringify({ seq, pad: "x".repeat(40) }));
+    appendFileSync(target, `${lines.join("\n")}\n`);
+
+    const tail = readTail<{ seq: number }>(target, 3);
+
+    assert.deepEqual(
+      tail.map((record) => record.seq),
+      [19_997, 19_998, 19_999],
+    );
+    rmSync(dir, { recursive: true, force: true });
+  });
+
+  test("a multibyte character split across read chunks is decoded intact", () => {
+    const dir = tempDir();
+    const target = join(dir, "log.jsonl");
+    const lines = Array.from({ length: 4000 }, (_, seq) => JSON.stringify({ seq, text: "ação—verificação" }));
+    appendFileSync(target, `${lines.join("\n")}\n`);
+
+    const tail = readTail<{ seq: number; text: string }>(target, 3000);
+
+    assert.equal(tail.length, 3000);
+    assert.ok(tail.every((record) => record.text === "ação—verificação"));
+    rmSync(dir, { recursive: true, force: true });
+  });
+});

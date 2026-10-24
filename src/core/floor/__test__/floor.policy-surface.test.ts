@@ -312,3 +312,47 @@ test("with no extraSurfacePaths, an unrelated path is unaffected", () => {
   const verdict = checkPolicySurface(PROJECT, command, tokenizeShell(command));
   assert.equal(verdict.kind, "allow");
 });
+
+test("git reads stay readers when they name another directory with -C", () => {
+  assertAllowed(`git -C ${PROJECT} status --porcelain`);
+  assertAllowed(`git -C /other/repo check-ignore -v ${CONFIG}`);
+  assertAllowed(`git --git-dir=/other/.git log -1 -- ${CONFIG}`);
+  assertAllowed(`git rev-parse --show-toplevel ${CONFIG}`);
+  assertAllowed(`git ls-tree HEAD ${CONFIG}`);
+  assertAllowed(`git grep -n mode -- ${CONFIG}`);
+});
+
+test("a git option that runs a program or writes a file is never a reader", () => {
+  assertDenied(`git -c core.pager='sh -c "rm ${CONFIG}"' show HEAD:${CONFIG}`);
+  assertDenied(`git diff --output=${CONFIG}`);
+  assertDenied(`git log --output ${CONFIG} -1`);
+  assertDenied(`git grep -O mode -- ${CONFIG}`);
+  assertDenied(`git -C /other/repo checkout -- ${CONFIG}`);
+});
+
+test("cd is allowed, and a relative path after it is judged against where cd went", () => {
+  assertAllowed(`cd /tmp && cat ${PROJECT}/${CONFIG}`);
+  assertAllowed(`cd ${PROJECT} && ls ${CONFIG}`);
+  assertDenied("cd .tlc/harness && rm config.json");
+  assertDenied(`cd ${PROJECT}/.tlc && rm -rf harness`);
+  assertDenied(`cd /tmp | rm ${CONFIG}`);
+});
+
+test("find without an action that runs or writes is a reader", () => {
+  assertAllowed(`find ${PROJECT}/.tlc -name '*.lock' -newermt '2026-10-23'`);
+  assertDenied(`find ${PROJECT}/.tlc -name '*.json' -delete`);
+  assertDenied(`find ${PROJECT}/.tlc -name config.json -exec rm {} +`);
+  assertDenied(`find ${PROJECT}/.tlc -fprint ${CONFIG}`);
+});
+
+test("a shell keyword in front of a command does not hide the verb", () => {
+  assertAllowed(`for i in 1 2; do tail -n 5 ${HANDOFF}; done`);
+  assertAllowed(`if test -f ${HANDOFF}; then head -c 200 ${HANDOFF}; fi`);
+  assertDenied(`for i in 1 2; do rm ${CONFIG}; done`);
+  assertDenied(`if true; then rm ${CONFIG}; fi`);
+});
+
+test("a loop list or an assignment that carries a policy path stays denied", () => {
+  assertDenied(`for f in .tlc/harness/*; do rm $f; done`);
+  assertDenied(`F=${CONFIG}; rm $F`);
+});

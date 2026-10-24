@@ -133,22 +133,33 @@ findings without deleting tests, which on a malformed command sends it to edit h
 ## Lint and tests before push
 
 `push`, `gh pr create` and `gh pr merge` are refused unless the configured lint, test and (with `docs.severity:
-deny`) docs commands have passed **on the exact tree being shipped**. The hook never runs those commands itself: a
-real suite takes minutes, and both hosts kill a pre-tool hook long before that — Cursor refuses the tool when its hook
-is killed, so an inline suite meant every push was refused, green or not.
+deny`) docs commands have passed **on the commit being shipped** — the tree of `HEAD`, the same thing CI would test.
+The hook never runs those commands itself: a real suite takes minutes, and both hosts kill a pre-tool hook long
+before that — Cursor refuses the tool when its hook is killed, so an inline suite meant every push was refused,
+green or not.
 
-Instead the hook looks up a recorded verdict, keyed by the gate, its command and the git id of the working tree. It
-answers in milliseconds:
+What a ship carries is what decides whether gates are owed: the code the turn changed, plus every code change on
+the branch that is not on the remote's default branch yet. Code written in an earlier turn is therefore verified
+before it ships, an already pushed branch still needs its commit verified before a PR opens, and a `git push` with
+nothing new to send owes nothing. A command that commits and ships in one go — `git commit -am … && git push` —
+ships the working tree it is about to commit, so that tree is the one that needs the verdict.
 
-- a passing verdict for this tree lets the push through;
+The hook looks up a recorded verdict, keyed by the gate, its command and the git id of a tree, and answers in
+milliseconds:
+
+- a passing verdict for the commit lets the push through;
 - a failing one refuses it with the recorded output;
+- a verdict recorded over uncommitted changes refuses it and names the files — what was tested is not what ships —
+  until they are committed, stashed or ignored;
 - no verdict refuses it and tells the agent to run `tlc harness verify`.
 
 `tlc harness verify` runs the commands in the agent's own shell, where no hook timeout applies, and records the
 result. A `stop` gate run records one too, so a turn whose gates already passed usually pushes without the extra
-step. The tree id covers uncommitted and untracked files, so a verdict recorded before a commit still covers the
-push of that commit, and any edit after it does not. Linked worktrees share one record with their main checkout. A
-gate that rewrites files while it runs is not recorded, because its verdict describes a tree that no longer exists.
+step. A verdict recorded with a clean tree covers the push of that commit even when scratch files appear later,
+and a verdict recorded before a commit covers the commit made from that exact tree. The harness's own directory is
+left out of every tree id, so its lessons and state never invalidate a verdict. Linked worktrees share one record
+with their main checkout. A gate that rewrites files while it runs is not recorded, because its verdict describes a
+tree that no longer exists.
 
 The `stop` grind follows the same rule. It reuses a verdict recorded for the current tree by this session or by
 `tlc harness verify`, and otherwise runs the gate inline within a 90-second budget, ending the whole process tree if
