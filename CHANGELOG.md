@@ -6,7 +6,7 @@ Each entry is an architectural decision record: what changed, why, what was refu
 A **Needs your action** line is a change `tlc harness doctor` cannot detect for you; everything else
 doctor reports against your own configuration.
 
-## Unreleased
+## v0.16.8
 
 - **AD-146** — gates are verdicts about a tree; hooks read them and never wait for a suite
   - **Needs your action:** A push, PR open or merge now needs a passing verdict for the commit being shipped. When one is refused, run `tlc harness verify` in the shell — with a timeout long enough for the whole suite, or in the background — and retry; commit or stash uncommitted changes first. Nothing changes in your config, and doctor cannot see this one: it shows up as a refused push.
